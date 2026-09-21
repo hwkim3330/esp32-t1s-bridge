@@ -27,13 +27,24 @@ W5500Spi *gW5500Spi = nullptr;  // defined here; w5500_spi.h only declares it ex
 // ---- W5500 SPI wiring (esp32-lidar/firmware/lidar_probe/lidar_probe.ino) ----
 constexpr int kSck = 48, kMosi = 21, kCs = 45, kMiso = 47;  // no INT, no RST wired
 
+// ---- Node identity: one board is NODE_ID=1 (192.168.100.60), the other
+// NODE_ID=2 (192.168.100.61) -- set via
+// `--build-property "compiler.cpp.extra_flags=-DNODE_ID=2"`. Both publish
+// under their own keyexpr and subscribe to everyone else's.
+#ifndef NODE_ID
+#define NODE_ID 1
+#endif
+#define ESP_IP_LAST (59 + NODE_ID)  // NODE_ID=1 -> .60, NODE_ID=2 -> .61
+
 // ---- Kontron D10 segment addressing (PC's enp4s0 is 192.168.100.50) ----
-static const IPAddress kLocalIP(192, 168, 100, 60);
+static const IPAddress kLocalIP(192, 168, 100, ESP_IP_LAST);
 static const IPAddress kMask(255, 255, 255, 0);
-static const IPAddress kGateway(192, 168, 100, 60);  // no router; loops to self
+static const IPAddress kGateway(192, 168, 100, ESP_IP_LAST);  // no router; loops to self
 #define PC_LOCATOR "udp/192.168.100.50:7447"
 
-#define PUB_KEYEXPR "bridge/esp32"
+#define _STR(x) #x
+#define STR(x) _STR(x)
+#define PUB_KEYEXPR "bridge/esp32-" STR(NODE_ID)
 #define SUB_KEYEXPR "bridge/**"
 
 static z_owned_session_t s_session;
@@ -130,7 +141,7 @@ void zenohBridgeLoop() {
 
   delay(1000);
   char buf[64];
-  snprintf(buf, sizeof(buf), "[esp32 %4u] hello from W5500", (unsigned)s_idx++);
+  snprintf(buf, sizeof(buf), "[esp32-%d %4u] hello from W5500", NODE_ID, (unsigned)s_idx++);
 
   z_owned_bytes_t payload;
   z_bytes_copy_from_str(&payload, buf);
