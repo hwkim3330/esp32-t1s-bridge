@@ -96,6 +96,36 @@ The static IP / peer address in `zenoh_bridge.cpp` (`kLocalIP`,
 `PC_LOCATOR`) matches whatever segment the board is currently plugged
 into — check those before flashing onto a different network.
 
+## D10 QoS/TSN — control channel works, before/after doesn't show a delta yet
+
+`pc/qos_before_after.py` and `pc/congestion_before_after.py` talk to the
+D10's WebStaX JSON-RPC (`http://<d10-ip>/json_rpc`, Basic auth
+`admin`/blank, same interface `d10-tsn-manager` uses) to actually change
+`qos.config.interface.queueShaper` on the ESP32 ports and watch
+`test/stats/**` respond. Real, working control path — worth stating
+plainly what it did and didn't show:
+
+- The JSON-RPC call shape learned the hard way: `params` is 3 flat
+  arguments (`[port, queue, value]`), not `[[port, queue], value]` — the
+  latter fails with a clear "argument-cnt-expect 3, actual 2" rather than
+  silently doing nothing.
+- `Cir` (committed rate, kbps) below the switch's minimum granularity
+  rejects with a QOS parameter error; 64-100 worked. But this project's
+  actual traffic is tiny (a few kbit/s across all `bridge/**`+`test/**`+
+  `ivn/**` combined), so shaping it down to 64-100 kbps barely constrains
+  anything — no clean before/after delta.
+- `congestion_before_after.py` instead offers a raw UDP flood (~950 Mbit/s
+  attempted from the PC's own socket loop, unverified whether that's what
+  actually left the NIC) at one ESP32's IP with no QoS protection
+  configured, to show what contention does to the RTT probe. Measured:
+  **no significant change** in `test/stats/esp32-1`'s avg/jitter. Either
+  the flood didn't really load that 100 Mbit egress port the way the
+  offered-rate number suggests, or the D10's own default queuing already
+  isolates small control traffic well. Not chased further yet — a
+  dedicated packet generator (scapy, `pktgen`) instead of a bare Python
+  socket loop, and reading the D10's own port counters instead of just
+  the RTT probe, would be the next things to check.
+
 ## Planned
 
 - **Cabin domain (5th of 8)**: WiFi CSI-based presence/motion sensing on

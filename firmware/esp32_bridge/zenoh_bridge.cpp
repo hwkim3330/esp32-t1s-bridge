@@ -275,7 +275,7 @@ void zenohBridgeLoop() {
     z_publisher_put(z_publisher_loan(&s_ping_pub), z_bytes_move(&ping_payload), NULL);
   }
 
-  if (now - t_stats >= 1000 && s_rtt.count > 0) {  // 1 Hz stats report
+  if (now - t_stats >= 1000 && s_rtt.count > 0) {  // 1 Hz stats report, rolling 1s window
     t_stats = now;
     RttStats &s = s_rtt;
     double avg_ms = (double)s.sum_us / s.count / 1000.0;
@@ -287,6 +287,14 @@ void zenohBridgeLoop() {
     z_owned_bytes_t stats_payload;
     z_bytes_copy_from_str(&stats_payload, sbuf);
     z_publisher_put(z_publisher_loan(&s_stats_pub), z_bytes_move(&stats_payload), NULL);
+    // Reset for the next window rather than accumulating since boot: a
+    // months-old average would hide a transient QoS-induced spike behind
+    // its own history, and "what does the link look like right now" is
+    // the more useful number for both the dashboard and the D10 QoS
+    // before/after test (see pc/qos_before_after.py).
+    int64_t last = s.last_us;
+    s = RttStats();
+    s.last_us = last;
   }
 
   if (now - t_domain >= 500) {  // 2 Hz virtual domain traffic
