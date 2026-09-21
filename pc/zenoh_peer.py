@@ -9,8 +9,16 @@ import time
 import zenoh
 
 conf = zenoh.Config()
-conf.insert_json5("mode", '"peer"')
-conf.insert_json5("listen/endpoints", '["udp/192.168.100.50:7447"]')
+# A dedicated `zenohd` router now owns udp/192.168.100.50:7447 (the ESP32
+# boards' PC_LOCATOR) -- this script, dds_adapter.py and zenoh-bridge-dds
+# all connect to it as clients. Running this script itself in "router" or
+# "peer" mode *listening* on that address only relays traffic it
+# originates, not traffic between two OTHER sessions attached to it (the
+# ESP32 boards vs. this process) -- that's a router's actual job, so it
+# gets its own process instead of being folded into whichever script
+# happened to be listening first.
+conf.insert_json5("mode", '"client"')
+conf.insert_json5("connect/endpoints", '["udp/192.168.100.50:7447"]')
 
 
 def on_sample(sample):

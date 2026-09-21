@@ -15,21 +15,35 @@ Task alignment, roughly:
 |---|---|
 | 10Mbps edge Ethernet | RJ45/W5500 now → 10BASE-T1S later |
 | Pub/sub middleware | zenoh-pico on ESP32 |
-| DDS (mandatory per task doc) | planned: `zenoh-plugin-dds` bridge + Fast DDS on the PC (already installed via ROS2 Jazzy) |
+| DDS (mandatory per task doc) | done: `zenoh-bridge-dds` + `pc/dds_adapter.py` in front of Fast DDS (ROS2 Jazzy) — see below |
 | Edge→HPC delay/jitter test | `pc/zenoh_peer.py` RTT echo + firmware ping/pong — see below |
-| Virtual domains (target 8) | not started |
+| Virtual domains (target 8) | 4 done (chassis/body/diag×2), cabin (WiFi CSI) next |
 | QoS/TSN before/after on D10 | not started |
 | Multiplexing (target 2) | not started |
 
 ## What works now
 
 - `firmware/esp32_bridge/`: ESP32-S3 + W5500 (SPI Ethernet), zenoh-pico as
-  a Zenoh peer. Two boards run the same firmware (`NODE_ID` build flag
+  a Zenoh client. Two boards run the same firmware (`NODE_ID` build flag
   picks IP `.60`/`.61` and keyexpr `bridge/esp32-1`/`bridge/esp32-2`),
   verified together on a Kontron D10 switch: both link at 100 Mbit
-  full-duplex and exchange pub/sub with a Zenoh peer on the PC. The two
-  ESP32s don't see each other directly yet (peer mode, no router) — only
-  via the PC's session.
+  full-duplex and exchange pub/sub through a `zenohd` router on the PC.
+  A router, not a peer: two boards each only connected to the PC (not to
+  each other) need something that explicitly forwards between them, which
+  is a router's actual job — an earlier version tried folding that role
+  into whichever script happened to be listening first, and a third
+  session (the DDS adapter, below) never saw the ESP32s' samples because
+  of it.
+- **DDS bridge**, real and verified end-to-end: `pc/dds_adapter.py`
+  CDR-encodes each `bridge/**`/`test/stats/**`/`ivn/**` sample as a
+  `std_msgs/String` and republishes it on `rt/<key>`, the naming
+  [`zenoh-bridge-dds`](https://github.com/eclipse-zenoh/zenoh-plugin-dds)
+  uses for DDS topic `/<key>`. Confirmed with a plain
+  `ros2 topic echo /ivn/chassis/wheel_speed std_msgs/msg/String` printing
+  the ESP32's live sine-sweep values, over Fast DDS (`ros-jazzy-fastrtps`,
+  no ROS2-specific code involved on the bridge side). `scripts/06-fetch-dds-tools.sh`
+  gets the two binaries (`zenohd`, `zenoh-bridge-dds`), pinned to 1.10.1 to
+  match the `eclipse-zenoh` Python version these scripts use.
 - **RTT/jitter probe**, live on both boards: each publishes
   `test/ping/esp32-N` at 5 Hz with its own send timestamp; `pc/zenoh_peer.py`
   echoes it back unchanged on `test/pong/esp32-N`; the board computes
@@ -84,12 +98,12 @@ into — check those before flashing onto a different network.
 
 ## Planned
 
-- **DDS bridge**: `zenoh-plugin-dds` (or `zenoh-bridge-dds`) on the PC,
-  fronting Fast DDS (already present via `ros-jazzy-fastrtps`) — this is
-  what the task document actually requires on the HPC side, not Zenoh
-  alone.
-- **Virtual domains**: tag traffic into 4 (then 8) logical domains,
-  probably as VLANs on the D10 plus a keyexpr namespace per domain.
+- **Cabin domain (5th of 8)**: WiFi CSI-based presence/motion sensing on
+  one board (`esp_wifi_set_csi_rx_cb`), published as `ivn/cabin/*` — kept
+  separate from the working Ethernet/Zenoh session until confirmed WiFi
+  doesn't disturb it. 3 more domains after that to reach 8, plus VLANs on
+  the D10 to actually segment them (currently all 4 domains share one
+  flat subnet).
 - **QoS/TSN before/after**: configure the D10's QoS/TSN and re-run the
   RTT probe under load to show the delta.
 - **Multiplexing**: a second physical path between a node and the D10

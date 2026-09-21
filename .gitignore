@@ -9,6 +9,9 @@ build-*/
 # zenoh-pico assembled as an Arduino library (scripts/50-*.sh regenerates it)
 firmware/esp32_bridge/lib/
 
+# zenohd / zenoh-bridge-dds standalone binaries (scripts/06-*.sh re-fetches them)
+tools/
+
 *.log
 logs/
 
