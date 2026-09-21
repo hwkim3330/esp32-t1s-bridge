@@ -18,6 +18,7 @@
 #include "zenoh_bridge.h"
 
 #include <Arduino.h>
+#include <cmath>
 #include <esp_timer.h>
 #include <zenoh-pico.h>
 
@@ -56,6 +57,18 @@ static const IPAddress kGateway(192, 168, 100, ESP_IP_LAST);  // no router; loop
 #define PONG_KEYEXPR "test/pong/esp32-" STR(NODE_ID)
 #define STATS_KEYEXPR "test/stats/esp32-" STR(NODE_ID)
 
+// ---- Virtual domains (KETI IVN 3세부 test metric: virtual domain count,
+// target 8; 4 here). Each ECU role publishes synthetic-but-labeled traffic
+// under its own domain -- no physical sensor needed for this metric, the
+// point is the domain/QoS separation over the same Ethernet, not the data
+// source. NODE_ID=1 plays chassis ECU, NODE_ID=2 plays body ECU; both play
+// diag. Cabin (WiFi CSI presence/motion) is the next domain, added once
+// CSI is confirmed not to disturb the Ethernet/Zenoh session running here.
+#define DIAG_KEYEXPR "ivn/diag/esp32-" STR(NODE_ID)
+#define CHASSIS_WHEEL_KEYEXPR "ivn/chassis/wheel_speed"
+#define CHASSIS_VEHICLE_KEYEXPR "ivn/chassis/vehicle_speed"
+#define BODY_KEYEXPR "ivn/body/control"
+
 struct RttStats {
   uint32_t count = 0;
   int64_t sum_us = 0;
@@ -70,6 +83,10 @@ static z_owned_session_t s_session;
 static z_owned_publisher_t s_pub;
 static z_owned_publisher_t s_ping_pub;
 static z_owned_publisher_t s_stats_pub;
+static z_owned_publisher_t s_diag_pub;
+static z_owned_publisher_t s_chassis_wheel_pub;
+static z_owned_publisher_t s_chassis_vehicle_pub;
+static z_owned_publisher_t s_body_pub;
 static z_owned_subscriber_t s_sub;
 static z_owned_subscriber_t s_pong_sub;
 static bool s_zenoh_up = false;
@@ -173,8 +190,40 @@ static bool startZenoh() {
     return false;
   }
 
+  z_view_keyexpr_t diag_ke;
+  z_view_keyexpr_from_str_unchecked(&diag_ke, DIAG_KEYEXPR);
+  if (z_declare_publisher(z_session_loan(&s_session), &s_diag_pub, z_view_keyexpr_loan(&diag_ke), NULL) < 0) {
+    Serial.println("[zenoh] diag publisher declare FAILED");
+    return false;
+  }
+
+  if (NODE_ID == 1) {
+    z_view_keyexpr_t wheel_ke;
+    z_view_keyexpr_from_str_unchecked(&wheel_ke, CHASSIS_WHEEL_KEYEXPR);
+    if (z_declare_publisher(z_session_loan(&s_session), &s_chassis_wheel_pub, z_view_keyexpr_loan(&wheel_ke),
+                             NULL) < 0) {
+      Serial.println("[zenoh] chassis wheel publisher declare FAILED");
+      return false;
+    }
+    z_view_keyexpr_t vehicle_ke;
+    z_view_keyexpr_from_str_unchecked(&vehicle_ke, CHASSIS_VEHICLE_KEYEXPR);
+    if (z_declare_publisher(z_session_loan(&s_session), &s_chassis_vehicle_pub, z_view_keyexpr_loan(&vehicle_ke),
+                             NULL) < 0) {
+      Serial.println("[zenoh] chassis vehicle publisher declare FAILED");
+      return false;
+    }
+  } else if (NODE_ID == 2) {
+    z_view_keyexpr_t body_ke;
+    z_view_keyexpr_from_str_unchecked(&body_ke, BODY_KEYEXPR);
+    if (z_declare_publisher(z_session_loan(&s_session), &s_body_pub, z_view_keyexpr_loan(&body_ke), NULL) < 0) {
+      Serial.println("[zenoh] body publisher declare FAILED");
+      return false;
+    }
+  }
+
   s_rtt = RttStats();
-  Serial.println("[zenoh] session up: pub=" PUB_KEYEXPR " sub=" SUB_KEYEXPR " ping=" PING_KEYEXPR);
+  Serial.println("[zenoh] session up: pub=" PUB_KEYEXPR " sub=" SUB_KEYEXPR " ping=" PING_KEYEXPR
+                  " diag=" DIAG_KEYEXPR);
   return true;
 }
 
@@ -214,7 +263,7 @@ void zenohBridgeLoop() {
     }
   }
 
-  static uint32_t t_hello = 0, t_ping = 0, t_stats = 0;
+  static uint32_t t_hello = 0, t_ping = 0, t_stats = 0, t_domain = 0;
   uint32_t now = millis();
 
   if (now - t_ping >= 200) {  // 5 Hz RTT probe
@@ -238,6 +287,41 @@ void zenohBridgeLoop() {
     z_owned_bytes_t stats_payload;
     z_bytes_copy_from_str(&stats_payload, sbuf);
     z_publisher_put(z_publisher_loan(&s_stats_pub), z_bytes_move(&stats_payload), NULL);
+  }
+
+  if (now - t_domain >= 500) {  // 2 Hz virtual domain traffic
+    t_domain = now;
+    char dbuf[80];
+    snprintf(dbuf, sizeof(dbuf), "uptime_s=%lu free_heap=%u rtt_avg_ms=%.2f rtt_jitter_ms=%.2f",
+             (unsigned long)(now / 1000), (unsigned)ESP.getFreeHeap(),
+             s_rtt.count ? (double)s_rtt.sum_us / s_rtt.count / 1000.0 : 0.0,
+             s_rtt.count > 1 ? (double)s_rtt.jitter_sum_us / (s_rtt.count - 1) / 1000.0 : 0.0);
+    z_owned_bytes_t diag_payload;
+    z_bytes_copy_from_str(&diag_payload, dbuf);
+    z_publisher_put(z_publisher_loan(&s_diag_pub), z_bytes_move(&diag_payload), NULL);
+
+    if (NODE_ID == 1) {
+      // Synthetic but labeled: a smooth 0-120 km/h sweep, wheel speed
+      // running slightly ahead of vehicle speed (a plausible, if fake,
+      // slip figure) rather than two identical numbers under two names.
+      float vehicle_kmh = 60.0f + 60.0f * sinf(now / 4000.0f);
+      float wheel_kmh = vehicle_kmh * 1.02f;
+      char wbuf[32], vbuf[32];
+      snprintf(wbuf, sizeof(wbuf), "%.1f", wheel_kmh);
+      snprintf(vbuf, sizeof(vbuf), "%.1f", vehicle_kmh);
+      z_owned_bytes_t wheel_payload, vehicle_payload;
+      z_bytes_copy_from_str(&wheel_payload, wbuf);
+      z_bytes_copy_from_str(&vehicle_payload, vbuf);
+      z_publisher_put(z_publisher_loan(&s_chassis_wheel_pub), z_bytes_move(&wheel_payload), NULL);
+      z_publisher_put(z_publisher_loan(&s_chassis_vehicle_pub), z_bytes_move(&vehicle_payload), NULL);
+    } else if (NODE_ID == 2) {
+      // Door lock state, flipping every ~6s -- a body-domain event stream
+      // rather than a periodic sensor value.
+      const char *state = ((now / 6000) % 2 == 0) ? "locked" : "unlocked";
+      z_owned_bytes_t body_payload;
+      z_bytes_copy_from_str(&body_payload, state);
+      z_publisher_put(z_publisher_loan(&s_body_pub), z_bytes_move(&body_payload), NULL);
+    }
   }
 
   if (now - t_hello >= 2000) {

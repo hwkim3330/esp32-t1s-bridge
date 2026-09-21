@@ -33,8 +33,9 @@ with zenoh.open(conf) as session:
     sub = session.declare_subscriber("bridge/**", on_sample)
     stats_sub = session.declare_subscriber("test/stats/**", on_sample)
     ping_sub = session.declare_subscriber("test/ping/**", make_echo(session))
+    domain_sub = session.declare_subscriber("ivn/**", on_sample)  # chassis/body/diag/cabin
     pub = session.declare_publisher("bridge/pc")
-    print("zenoh peer up on udp/192.168.100.50:7447, sub=bridge/**,test/** pub=bridge/pc", flush=True)
+    print("zenoh peer up on udp/192.168.100.50:7447, sub=bridge/**,test/**,ivn/** pub=bridge/pc", flush=True)
     i = 0
     while True:
         pub.put(f"[pc {i}] hello from enp4s0")
