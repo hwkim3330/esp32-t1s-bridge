@@ -17,9 +17,9 @@ Task alignment, roughly:
 | Pub/sub middleware | zenoh-pico on ESP32 |
 | DDS (mandatory per task doc) | done: `zenoh-bridge-dds` + `pc/dds_adapter.py` in front of Fast DDS (ROS2 Jazzy) — see below |
 | Edge→HPC delay/jitter test | `pc/zenoh_peer.py` RTT echo + firmware ping/pong — see below |
-| Virtual domains (target 8) | 4 done (chassis/body/diag×2), cabin (WiFi CSI) next |
-| QoS/TSN before/after on D10 | not started |
-| Multiplexing (target 2) | not started |
+| Virtual domains (target 8) | 5 done (chassis/body/cabin/diag×2), 3 more to go |
+| QoS/TSN before/after on D10 | control channel works, no clean delta yet — see below |
+| Multiplexing (target 2) | not started — needs a second D10 |
 
 ## What works now
 
@@ -69,6 +69,21 @@ Task alignment, roughly:
   unsupported there) with the feature at its own default of 0.
 - `pc/zenoh_peer.py`: the PC-side peer (`pip install eclipse-zenoh`). Relays
   `bridge/**`, answers the RTT probe, publishes a `bridge/pc` heartbeat.
+- **5 virtual domains live**: chassis (`ivn/chassis/wheel_speed`,
+  `vehicle_speed` — synthetic sine sweep, NODE_ID=1), body
+  (`ivn/body/control`, a lock/unlock event, NODE_ID=2), diag ×2
+  (`ivn/diag/esp32-N`), and **cabin** (`ivn/cabin/csi`, `ivn/cabin/presence`
+  — see `firmware/esp32_bridge/csi_link.h`): NODE_ID=1 runs a small closed
+  WiFi AP just for this, NODE_ID=2 joins it as a station and reads real
+  WiFi Channel State Information off the frames between them. No extra
+  sensor hardware — the two boards already on the bench are the sensor.
+  Verified stable for 30+s with both radios (WiFi + the W5500/Ethernet
+  session) running at once: RTT jitter moved from ~0.1-0.3ms to
+  ~0.3-0.5ms but stayed well inside the 2.5ms target, no crashes, no heap
+  drift. The presence threshold is an unvalidated guess and currently
+  saturates "present" at bench range (RSSI/variance never drop to what an
+  empty room looks like when the boards are inches apart) — the point
+  proven here is the RF sensing *path*, not sensor accuracy.
 
 ## Build
 
@@ -128,14 +143,12 @@ plainly what it did and didn't show:
 
 ## Planned
 
-- **Cabin domain (5th of 8)**: WiFi CSI-based presence/motion sensing on
-  one board (`esp_wifi_set_csi_rx_cb`), published as `ivn/cabin/*` — kept
-  separate from the working Ethernet/Zenoh session until confirmed WiFi
-  doesn't disturb it. 3 more domains after that to reach 8, plus VLANs on
-  the D10 to actually segment them (currently all 4 domains share one
-  flat subnet).
-- **QoS/TSN before/after**: configure the D10's QoS/TSN and re-run the
-  RTT probe under load to show the delta.
+- **3 more virtual domains** to reach 8 (5 done: chassis/body/cabin/diag×2),
+  plus VLANs on the D10 to actually segment them (currently all 5 share
+  one flat subnet).
+- **QoS/TSN before/after, take two**: see the D10 QoS/TSN section above —
+  a real packet generator and the switch's own port counters instead of a
+  bare Python flood and the RTT probe alone.
 - **Multiplexing**: a second physical path between a node and the D10
   (target: 2), so a path can be cut without losing the session.
 - **10BASE-T1S**: swap or add to the W5500 for a single-pair automotive/
