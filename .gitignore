@@ -1,0 +1,16 @@
+# Build output
+build/
+build-*/
+*.elf
+*.hex
+*.bin
+*.map
+
+# zenoh-pico assembled as an Arduino library (scripts/50-*.sh regenerates it)
+firmware/esp32_bridge/lib/
+
+*.log
+logs/
+
+__pycache__/
+.venv/

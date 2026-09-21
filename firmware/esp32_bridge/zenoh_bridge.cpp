@@ -1,0 +1,142 @@
+// ESP32-S3 + W5500, talking Zenoh to a peer on this PC over the Kontron D10
+// switch (same 192.168.100.0/24 subnet as the PC's enp4s0 -- see
+// afdx-jitter's D10 notes). No DHCP server on that segment, so a static IP
+// and an explicit peer locator instead of multicast scouting.
+//
+// zenoh-pico is vendored under ../lib/zenoh-pico (see
+// scripts/50-build-zenoh-arduino-lib.sh at the repo root) and pulled in via
+// `arduino-cli compile --library firmware/esp32_bridge/lib/zenoh-pico`.
+//
+// The W5500 bring-up (eth_w5500.h / w5500_spi.h) and its pin mapping are
+// carried over from esp32-lidar/firmware/lidar_probe verbatim: raw
+// esp_eth + esp_netif instead of Arduino's ETH class, because ETH.begin
+// hardcodes a 10ms MAC poll period with no way to change it afterwards, and
+// the IDF driver's own buffer-read has a real bug at the W5500's 16kB
+// receive-buffer wrap that w5500_spi.h works around. Do not switch back to
+// ETH.begin() to "simplify" this. Pinout is keti-reconfig's measured one,
+// not a datasheet default -- see the comment in lidar_probe.ino.
+#include "zenoh_bridge.h"
+
+#include <Arduino.h>
+#include <zenoh-pico.h>
+
+#include "eth_w5500.h"
+
+W5500Spi *gW5500Spi = nullptr;  // defined here; w5500_spi.h only declares it extern
+
+// ---- W5500 SPI wiring (esp32-lidar/firmware/lidar_probe/lidar_probe.ino) ----
+constexpr int kSck = 48, kMosi = 21, kCs = 45, kMiso = 47;  // no INT, no RST wired
+
+// ---- Kontron D10 segment addressing (PC's enp4s0 is 192.168.100.50) ----
+static const IPAddress kLocalIP(192, 168, 100, 60);
+static const IPAddress kMask(255, 255, 255, 0);
+static const IPAddress kGateway(192, 168, 100, 60);  // no router; loops to self
+#define PC_LOCATOR "udp/192.168.100.50:7447"
+
+#define PUB_KEYEXPR "bridge/esp32"
+#define SUB_KEYEXPR "bridge/**"
+
+static z_owned_session_t s_session;
+static z_owned_publisher_t s_pub;
+static z_owned_subscriber_t s_sub;
+static bool s_zenoh_up = false;
+static uint32_t s_idx = 0;
+
+static void dataHandler(z_loaned_sample_t *sample, void *arg) {
+  (void)arg;
+  z_view_string_t keystr;
+  z_keyexpr_as_view_string(z_sample_keyexpr(sample), &keystr);
+  z_owned_string_t value;
+  z_bytes_to_string(z_sample_payload(sample), &value);
+
+  Serial.print(" >> [sub] (");
+  Serial.write(z_string_data(z_view_string_loan(&keystr)), z_string_len(z_view_string_loan(&keystr)));
+  Serial.print(", ");
+  Serial.write(z_string_data(z_string_loan(&value)), z_string_len(z_string_loan(&value)));
+  Serial.println(")");
+
+  z_string_drop(z_string_move(&value));
+}
+
+static bool startZenoh() {
+  z_owned_config_t config;
+  z_config_default(&config);
+  zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, "peer");
+  zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, PC_LOCATOR);
+
+  Serial.print("[zenoh] opening session...");
+  if (z_open(&s_session, z_config_move(&config), NULL) < 0) {
+    Serial.println(" FAILED");
+    return false;
+  }
+  Serial.println(" ok");
+
+  z_view_keyexpr_t sub_ke;
+  z_view_keyexpr_from_str_unchecked(&sub_ke, SUB_KEYEXPR);
+  z_owned_closure_sample_t callback;
+  z_closure_sample(&callback, dataHandler, NULL, NULL);
+  if (z_declare_subscriber(z_session_loan(&s_session), &s_sub, z_view_keyexpr_loan(&sub_ke),
+                            z_closure_sample_move(&callback), NULL) < 0) {
+    Serial.println("[zenoh] subscriber declare FAILED");
+    return false;
+  }
+
+  z_view_keyexpr_t pub_ke;
+  z_view_keyexpr_from_str_unchecked(&pub_ke, PUB_KEYEXPR);
+  if (z_declare_publisher(z_session_loan(&s_session), &s_pub, z_view_keyexpr_loan(&pub_ke), NULL) < 0) {
+    Serial.println("[zenoh] publisher declare FAILED");
+    return false;
+  }
+
+  Serial.println("[zenoh] session up: pub=" PUB_KEYEXPR " sub=" SUB_KEYEXPR);
+  return true;
+}
+
+void zenohBridgeSetup() {
+  Serial.begin(115200);
+  uint32_t t0 = millis();
+  while (!Serial && millis() - t0 < 3000) {
+    delay(10);
+  }
+
+  if (!ethStart(kSck, kMiso, kMosi, kCs, /*pollPeriodMs=*/1, kLocalIP, kMask, kGateway)) {
+    Serial.println("[eth] ethStart() failed");
+  }
+
+  Serial.print("[eth] waiting for link");
+  while (!ethLinkUp()) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.printf("\n[eth] link up, %u Mbit %s-duplex, IP %s, MAC %s\n", ethLinkSpeed(),
+                ethFullDuplex() ? "full" : "half", ethLocalIP().toString().c_str(),
+                ethMacAddress().c_str());
+}
+
+void zenohBridgeLoop() {
+  if (!ethLinkUp()) {
+    s_zenoh_up = false;
+    delay(500);
+    return;
+  }
+
+  if (!s_zenoh_up) {
+    s_zenoh_up = startZenoh();
+    if (!s_zenoh_up) {
+      delay(2000);
+      return;
+    }
+  }
+
+  delay(1000);
+  char buf[64];
+  snprintf(buf, sizeof(buf), "[esp32 %4u] hello from W5500", (unsigned)s_idx++);
+
+  z_owned_bytes_t payload;
+  z_bytes_copy_from_str(&payload, buf);
+  if (z_publisher_put(z_publisher_loan(&s_pub), z_bytes_move(&payload), NULL) < 0) {
+    Serial.println("[zenoh] publish failed");
+  } else {
+    Serial.printf("[pub] %s\n", buf);
+  }
+}
