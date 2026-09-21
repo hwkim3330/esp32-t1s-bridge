@@ -23,6 +23,7 @@
 #include <zenoh-pico.h>
 
 #include "eth_w5500.h"
+#include "zenoh_bridge_domains.h"
 
 W5500Spi *gW5500Spi = nullptr;  // defined here; w5500_spi.h only declares it extern
 
@@ -37,6 +38,8 @@ constexpr int kSck = 48, kMosi = 21, kCs = 45, kMiso = 47;  // no INT, no RST wi
 #define NODE_ID 1
 #endif
 #define ESP_IP_LAST (59 + NODE_ID)  // NODE_ID=1 -> .60, NODE_ID=2 -> .61
+
+#include "csi_link.h"  // needs NODE_ID defined above; provides csiLinkSetup()/csiLinkLoop()
 
 // ---- Kontron D10 segment addressing (PC's enp4s0 is 192.168.100.50) ----
 static const IPAddress kLocalIP(192, 168, 100, ESP_IP_LAST);
@@ -68,6 +71,8 @@ static const IPAddress kGateway(192, 168, 100, ESP_IP_LAST);  // no router; loop
 #define CHASSIS_WHEEL_KEYEXPR "ivn/chassis/wheel_speed"
 #define CHASSIS_VEHICLE_KEYEXPR "ivn/chassis/vehicle_speed"
 #define BODY_KEYEXPR "ivn/body/control"
+#define CABIN_CSI_KEYEXPR "ivn/cabin/csi"
+#define CABIN_PRESENCE_KEYEXPR "ivn/cabin/presence"
 
 struct RttStats {
   uint32_t count = 0;
@@ -87,11 +92,29 @@ static z_owned_publisher_t s_diag_pub;
 static z_owned_publisher_t s_chassis_wheel_pub;
 static z_owned_publisher_t s_chassis_vehicle_pub;
 static z_owned_publisher_t s_body_pub;
+static z_owned_publisher_t s_cabin_csi_pub;
+static z_owned_publisher_t s_cabin_presence_pub;
 static z_owned_subscriber_t s_sub;
 static z_owned_subscriber_t s_pong_sub;
 static bool s_zenoh_up = false;
 static uint32_t s_idx = 0;
 static uint32_t s_ping_seq = 0;
+
+// Called from csi_link.h's csiLinkLoop() (NODE_ID==2 only) -- kept out of
+// that header so it doesn't need zenoh-pico.h itself.
+void publishCabin(int8_t rssi, float amplitudeMean, float amplitudeVar, uint32_t frames, bool present) {
+  if (!s_zenoh_up) return;
+  char cbuf[80];
+  snprintf(cbuf, sizeof(cbuf), "rssi=%d amp_mean=%.1f amp_var=%.1f frames=%lu", (int)rssi, amplitudeMean,
+           amplitudeVar, (unsigned long)frames);
+  z_owned_bytes_t csi_payload;
+  z_bytes_copy_from_str(&csi_payload, cbuf);
+  z_publisher_put(z_publisher_loan(&s_cabin_csi_pub), z_bytes_move(&csi_payload), NULL);
+
+  z_owned_bytes_t presence_payload;
+  z_bytes_copy_from_str(&presence_payload, present ? "present" : "empty");
+  z_publisher_put(z_publisher_loan(&s_cabin_presence_pub), z_bytes_move(&presence_payload), NULL);
+}
 
 static void dataHandler(z_loaned_sample_t *sample, void *arg) {
   (void)arg;
@@ -219,6 +242,19 @@ static bool startZenoh() {
       Serial.println("[zenoh] body publisher declare FAILED");
       return false;
     }
+    z_view_keyexpr_t csi_ke;
+    z_view_keyexpr_from_str_unchecked(&csi_ke, CABIN_CSI_KEYEXPR);
+    if (z_declare_publisher(z_session_loan(&s_session), &s_cabin_csi_pub, z_view_keyexpr_loan(&csi_ke), NULL) < 0) {
+      Serial.println("[zenoh] cabin csi publisher declare FAILED");
+      return false;
+    }
+    z_view_keyexpr_t presence_ke;
+    z_view_keyexpr_from_str_unchecked(&presence_ke, CABIN_PRESENCE_KEYEXPR);
+    if (z_declare_publisher(z_session_loan(&s_session), &s_cabin_presence_pub, z_view_keyexpr_loan(&presence_ke),
+                             NULL) < 0) {
+      Serial.println("[zenoh] cabin presence publisher declare FAILED");
+      return false;
+    }
   }
 
   s_rtt = RttStats();
@@ -246,9 +282,16 @@ void zenohBridgeSetup() {
   Serial.printf("\n[eth] link up, %u Mbit %s-duplex, IP %s, MAC %s\n", ethLinkSpeed(),
                 ethFullDuplex() ? "full" : "half", ethLocalIP().toString().c_str(),
                 ethMacAddress().c_str());
+
+  // WiFi (cabin/CSI domain) after Ethernet is confirmed up: if the two are
+  // going to fight over anything (memory, event loop, IRQs), better to
+  // find out with a known-good Ethernet baseline already established.
+  csiLinkSetup();
 }
 
 void zenohBridgeLoop() {
+  csiLinkLoop();
+
   if (!ethLinkUp()) {
     s_zenoh_up = false;
     delay(500);
