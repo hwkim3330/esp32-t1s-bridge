@@ -35,8 +35,11 @@ from pydantic import BaseModel
 SWITCH1 = "http://192.168.100.1"  # PC side (Gi1/6), FRER Recovery
 SWITCH2 = "http://192.168.100.2"  # ESP32 side, FRER Generation
 ZENOH_LOCATOR = "udp/192.168.100.50:7447"
-FRER_INST = 1
+FRER_INST_A, FRER_INST_B = 1, 2      # A: edge->PC, B: PC->edge
 FRER_VLAN = 200
+# Where each direction's Recovery side sits: (switch, its egress port).
+# Only that end has readable statistics.
+FRER_RECOVERY = {"A": ("switch1", "Gi 1/6"), "B": ("switch2", "Gi 1/3")}
 
 NODES = {
     # esp32-1 moved to Gi1/3 after the cable-vs-board swap test (its
@@ -108,24 +111,31 @@ def _poll_switch(name: str, base_url: str, ports: list[str]):
                 }
             except RuntimeError:
                 pass
-        try:
-            out["frer"]["status"] = rpc(base_url, "frer.status.get", [FRER_INST])
-        except RuntimeError as e:
-            out["frer"]["status"] = None
-            out["frer"]["statusError"] = str(e)
-        try:
-            out["frer"]["config"] = rpc(base_url, "frer.config.get", [FRER_INST])
-        except RuntimeError:
-            out["frer"]["config"] = None
-        # Recovery-side (switch1) statistics live on its egress port; Generation
-        # (switch2) rejects a specific-port query outright ("Ifindex must be
-        # VTSS_IFINDEX_NONE in generation mode") so only fetch it on switch1.
-        if name == "switch1":
+        # Both FRER directions, each with the switch/port where its Recovery
+        # side actually lives. Recovery statistics are keyed by the instance's
+        # EGRESS port; Generation rejects a port argument outright ("Ifindex
+        # must be VTSS_IFINDEX_NONE in generation mode"), so only the recovery
+        # end of each direction has readable counters.
+        out["frer"] = {}
+        for label, inst in (("A", FRER_INST_A), ("B", FRER_INST_B)):
+            entry = {}
             try:
-                out["frer"]["statistics"] = rpc(base_url, "frer.statistics.get", [FRER_INST, "Gi 1/6", 0])
+                entry["status"] = rpc(base_url, "frer.status.get", [inst])
             except RuntimeError as e:
-                out["frer"]["statistics"] = None
-                out["frer"]["statisticsError"] = str(e)
+                entry["status"] = None
+                entry["statusError"] = str(e)
+            try:
+                entry["config"] = rpc(base_url, "frer.config.get", [inst])
+            except RuntimeError:
+                entry["config"] = None
+            rec = FRER_RECOVERY.get(label)
+            if rec and rec[0] == name:
+                try:
+                    entry["statistics"] = rpc(base_url, "frer.statistics.get", [inst, rec[1], 0])
+                except RuntimeError as e:
+                    entry["statistics"] = None
+                    entry["statisticsError"] = str(e)
+            out["frer"][label] = entry
     except Exception as e:  # noqa: BLE001 -- switch unreachable, degrade gracefully
         out["reachable"] = False
         out["error"] = str(e)
