@@ -263,7 +263,55 @@ def get_state():
         "updatedAt": updated_at,
         "switches": switches,
         "nodes": nodes,
+        "csi": _csi_links(nodes, now),
     }
+
+
+def _csi_links(nodes, now):
+    """Resolve the CSI reports from every board into the paths between them.
+
+    The boards report against raw MACs and publish their own MAC alongside,
+    deliberately: no board knows which board is at the other end of a path.
+    The naming happens here, where every board's self MAC is already in hand.
+
+    A path is reported by both ends, so each direction is kept separately --
+    they are two independent measurements of the same air, and disagreement
+    between them is information, not noise to be averaged away.
+    """
+    mac_to_node, dirs = {}, {}
+    for node_id, node in nodes.items():
+        for r in node.get("recent", []):
+            if "cabin/csi" not in (r.get("key") or ""):
+                continue
+            fields = {}
+            peers = []
+            for seg in (r.get("val") or "").split(";"):
+                kv = dict(p.split("=", 1) for p in seg.split(",") if "=" in p)
+                if "self" in kv:
+                    fields = kv
+                elif "peer" in kv:
+                    peers.append(kv)
+            if not fields:
+                continue
+            mac_to_node[fields["self"].lower()] = node_id
+            dirs[node_id] = {"peers": peers, "ago": r.get("ago")}
+
+    links = []
+    for rx, entry in dirs.items():
+        for kv in entry["peers"]:
+            tx = mac_to_node.get(kv["peer"].lower())
+            if not tx or tx == rx:
+                continue  # a neighbouring network, not one of ours
+            try:
+                links.append({
+                    "rx": rx, "tx": tx,
+                    "rssi": int(kv["rssi"]), "var": float(kv["var"]),
+                    "mean": float(kv["mean"]), "frames": int(kv["frames"]),
+                    "ago": entry["ago"],
+                })
+            except (KeyError, ValueError):
+                continue
+    return {"links": links, "macs": mac_to_node}
 
 
 class PortShutdown(BaseModel):

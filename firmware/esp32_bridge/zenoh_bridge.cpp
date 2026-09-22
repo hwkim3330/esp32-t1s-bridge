@@ -83,8 +83,11 @@ static const IPAddress kGateway(192, 168, 100, ESP_IP_LAST);  // no router; loop
 #define CHASSIS_WHEEL_KEYEXPR "ivn/chassis/wheel_speed"
 #define CHASSIS_VEHICLE_KEYEXPR "ivn/chassis/vehicle_speed"
 #define BODY_KEYEXPR "ivn/body/control"
-#define CABIN_CSI_KEYEXPR "ivn/cabin/csi"
-#define CABIN_PRESENCE_KEYEXPR "ivn/cabin/presence"
+// Per board, not one shared key: all three publish their own view of the
+// triangle, and a key without the board in it leaves the PC unable to tell
+// the senders apart (and lands in its "unknown node" bucket).
+#define CABIN_CSI_KEYEXPR "ivn/cabin/csi/esp32-" STR(NODE_ID)
+#define CABIN_PRESENCE_KEYEXPR "ivn/cabin/presence/esp32-" STR(NODE_ID)
 
 struct RttStats {
   uint32_t count = 0;
@@ -113,15 +116,12 @@ static bool s_zenoh_up = false;
 static uint32_t s_idx = 0;
 static uint32_t s_ping_seq = 0;
 
-// Called from csi_link.h's csiLinkLoop() (NODE_ID==2 only) -- kept out of
+// Called from csi_link.h's csiLinkLoop() on every board -- kept out of
 // that header so it doesn't need zenoh-pico.h itself.
-void publishCabin(int8_t rssi, float amplitudeMean, float amplitudeVar, uint32_t frames, bool present) {
+void publishCabin(const char *csiLine, bool present) {
   if (!s_zenoh_up) return;
-  char cbuf[80];
-  snprintf(cbuf, sizeof(cbuf), "rssi=%d amp_mean=%.1f amp_var=%.1f frames=%lu", (int)rssi, amplitudeMean,
-           amplitudeVar, (unsigned long)frames);
   z_owned_bytes_t csi_payload;
-  z_bytes_copy_from_str(&csi_payload, cbuf);
+  z_bytes_copy_from_str(&csi_payload, csiLine);
   z_publisher_put(z_publisher_loan(&s_cabin_csi_pub), z_bytes_move(&csi_payload), NULL);
 
   z_owned_bytes_t presence_payload;
@@ -283,19 +283,24 @@ static bool startZenoh() {
       Serial.println("[zenoh] body publisher declare FAILED");
       return false;
     }
-    z_view_keyexpr_t csi_ke;
-    z_view_keyexpr_from_str_unchecked(&csi_ke, CABIN_CSI_KEYEXPR);
-    if (z_declare_publisher(z_session_loan(&s_session), &s_cabin_csi_pub, z_view_keyexpr_loan(&csi_ke), NULL) < 0) {
-      Serial.println("[zenoh] cabin csi publisher declare FAILED");
-      return false;
-    }
-    z_view_keyexpr_t presence_ke;
-    z_view_keyexpr_from_str_unchecked(&presence_ke, CABIN_PRESENCE_KEYEXPR);
-    if (z_declare_publisher(z_session_loan(&s_session), &s_cabin_presence_pub, z_view_keyexpr_loan(&presence_ke),
-                             NULL) < 0) {
-      Serial.println("[zenoh] cabin presence publisher declare FAILED");
-      return false;
-    }
+  }
+
+  // Cabin belongs to every board, not just one: each measures the radio paths
+  // to the other two and publishes its own view, and the PC assembles the
+  // triangle from all three. This used to sit inside the NODE_ID==2 arm, from
+  // when a single board was the only one running CSI.
+  z_view_keyexpr_t csi_ke;
+  z_view_keyexpr_from_str_unchecked(&csi_ke, CABIN_CSI_KEYEXPR);
+  if (z_declare_publisher(z_session_loan(&s_session), &s_cabin_csi_pub, z_view_keyexpr_loan(&csi_ke), NULL) < 0) {
+    Serial.println("[zenoh] cabin csi publisher declare FAILED");
+    return false;
+  }
+  z_view_keyexpr_t presence_ke;
+  z_view_keyexpr_from_str_unchecked(&presence_ke, CABIN_PRESENCE_KEYEXPR);
+  if (z_declare_publisher(z_session_loan(&s_session), &s_cabin_presence_pub, z_view_keyexpr_loan(&presence_ke),
+                           NULL) < 0) {
+    Serial.println("[zenoh] cabin presence publisher declare FAILED");
+    return false;
   }
 
   s_rtt = RttStats();

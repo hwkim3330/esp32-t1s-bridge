@@ -190,6 +190,7 @@
     <button class="navitem" data-view="frer"><span class="dot"></span>FRER</button>
     <button class="navitem" data-view="switches"><span class="dot"></span>Switch Control</button>
     <button class="navitem" data-view="mux"><span class="dot"></span>Multiplexing</button>
+    <button class="navitem" data-view="csi"><span class="dot"></span>CSI Radar</button>
     <div class="sidebar-footer">
       <span class="conn-pill" id="connPill">connecting&hellip;</span>
       <div class="updated-at" id="updatedAt">&mdash;</div>
@@ -319,6 +320,32 @@
         </div>
         <p class="hint" style="margin:14px 0 0;"><strong>Never shut Gi 1/1.</strong> It is the only link carrying switch2's management VLAN &mdash; shutting it makes switch2 unreachable and needs a physical reboot. Gi 1/2 carries the FRER VLAN only, so it is the safe one to cut.</p>
         <div id="muxFrer" style="margin-top:18px;"></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-csi">
+      <h1>CSI Radar</h1>
+      <p class="lede">the three boards' radio paths, used as a direction-of-motion sensor</p>
+
+      <div class="card">
+        <h2>Paths <span class="hint">thicker = more channel disturbance right now</span></h2>
+        <div id="csiRadar" style="display:flex;justify-content:center;"></div>
+        <p class="hint" style="margin:14px 0 0;">Each edge is a real radio path between two boards, and its thickness is that path's CSI amplitude variance &mdash; how much the channel is wobbling. A body in a path's Fresnel zone changes the multipath and the edge thickens.</p>
+      </div>
+
+      <div class="card">
+        <h2>Directional readings <span class="hint">both ends measure each path independently</span></h2>
+        <div style="overflow-x:auto;">
+          <table class="reqs">
+            <thead><tr><th>Path</th><th>RSSI</th><th>Amplitude variance</th><th>Frames</th></tr></thead>
+            <tbody id="csiRows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>What this is not</h2>
+        <p style="margin:0;font-size:0.88rem;">There is <strong>no range axis</strong> here, and the picture deliberately draws none. Range resolution is <code>c/2B</code>, and B is one 20&nbsp;MHz WiFi channel &mdash; <strong>7.5&nbsp;m</strong>, so a room is a single range bin. Angle of arrival is out too: one antenna per board and three independent clocks, so there is no phase coherence to beamform with. Direction here comes from <em>which path</em> is disturbed, nothing more. Real range and bearing need bandwidth or an array &mdash; UWB (500&nbsp;MHz, ~30&nbsp;cm) or 60&nbsp;GHz mmWave.</p>
       </div>
     </section>
 
@@ -692,6 +719,59 @@ function renderSwitchControl(elId, swName, sw) {
   el.innerHTML = rows || `<tr><td colspan="5" style="color:var(--muted)">unreachable</td></tr>`;
 }
 
+const CSI_POS = {  // three boards, three bearings, 120 degrees apart
+  "esp32-1": { x: 170, y:  46, label: "ESP32-1" },
+  "esp32-2": { x:  44, y: 262, label: "ESP32-2" },
+  "esp32-3": { x: 296, y: 262, label: "ESP32-3" },
+};
+
+function renderCsi(state) {
+  const links = state.csi?.links || [];
+  // Each path is measured from both ends; show the livelier of the two, since
+  // a path is disturbed whether or not both ends happen to notice equally.
+  const paths = {};
+  for (const l of links) {
+    const key = [l.tx, l.rx].sort().join("|");
+    if (!paths[key] || l.var > paths[key].var) paths[key] = l;
+  }
+  const vals = Object.values(paths).map(p => p.var);
+  const vmax = Math.max(40, ...vals);
+
+  const edges = Object.entries(paths).map(([key, p]) => {
+    const [a, b] = key.split("|");
+    const A = CSI_POS[a], B = CSI_POS[b];
+    if (!A || !B) return "";
+    const f = Math.min(1, p.var / vmax);
+    const w = 1.5 + f * 9;
+    return `<line x1="${A.x}" y1="${A.y}" x2="${B.x}" y2="${B.y}" stroke="var(--accent)"
+              stroke-opacity="${(0.28 + f * 0.62).toFixed(2)}" stroke-width="${w.toFixed(1)}"
+              stroke-linecap="round"><title>${a} to ${b}: var ${p.var.toFixed(1)}</title></line>`;
+  }).join("");
+
+  const dots = Object.entries(CSI_POS).map(([id, P]) => {
+    const alive = state.nodes?.[id]?.zenohAlive;
+    return `<circle cx="${P.x}" cy="${P.y}" r="11" fill="${alive ? "var(--good)" : "var(--crit)"}"/>
+      <text x="${P.x}" y="${P.y + (P.y < 100 ? -20 : 30)}" text-anchor="middle" font-size="12"
+            font-weight="600" fill="currentColor">${P.label}</text>`;
+  }).join("");
+
+  document.getElementById("csiRadar").innerHTML = links.length
+    ? `<svg viewBox="0 0 340 300" style="max-width:420px;width:100%;height:auto;color:var(--ink);"
+            role="img" aria-label="Three boards and the radio paths between them, thicker where the channel is more disturbed">
+         ${edges}${dots}
+       </svg>`
+    : `<p class="hint" style="padding:30px 0;">no CSI reports yet</p>`;
+
+  const rows = links.sort((a, b) => b.var - a.var).map(l => `<tr>
+      <td class="metric">${l.tx} &rarr; ${l.rx}</td>
+      <td class="current">${l.rssi} dBm</td>
+      <td class="current">${l.var.toFixed(1)}</td>
+      <td class="current">${l.frames.toLocaleString()}</td>
+    </tr>`).join("");
+  document.getElementById("csiRows").innerHTML = rows ||
+    `<tr><td colspan="4" style="color:var(--muted)">no paths resolved &mdash; boards report raw MACs, and none matched a known board</td></tr>`;
+}
+
 function render(state) {
   document.getElementById("updatedAt").textContent = state.updatedAt ? new Date(state.updatedAt).toLocaleTimeString() : "—";
   document.getElementById("sw1Ip").textContent = state.switches.switch1?.ip || "192.168.100.1";
@@ -700,6 +780,7 @@ function render(state) {
   renderReqs(state);
   renderNodeCards(state);
   renderFrer(state);
+  renderCsi(state);
   pushRttSample();
   renderSwitchControl("sw1PortsCtl", "switch1", state.switches.switch1);
   renderSwitchControl("sw2PortsCtl", "switch2", state.switches.switch2);
