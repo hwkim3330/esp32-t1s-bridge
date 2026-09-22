@@ -208,6 +208,11 @@
       </div>
 
       <div class="card" style="margin-top:20px;">
+        <h2>Edge&rarr;HPC delay &amp; jitter <span class="hint">live, from each board's own RTT probe</span></h2>
+        <div style="height:260px;position:relative;"><canvas id="rttChart"></canvas></div>
+      </div>
+
+      <div class="card" style="margin-top:20px;">
         <h2>KETI IVN 3세부 요구사항 <span class="hint">6 official test metrics, not house numbers</span></h2>
         <div style="overflow-x:auto;">
           <table class="reqs">
@@ -226,26 +231,31 @@
 
     <section class="view" id="view-frer">
       <h1>FRER (802.1CB)</h1>
-      <p class="lede">bidirectional, STP fully off on both ring ports &mdash; static-FDB duplication only</p>
+      <p class="lede">bidirectional, STP off on both ring ports &mdash; duplicate on both paths, eliminate at the far end</p>
       <div class="card">
-        <h2>Status <span class="hint">A: esp32-3&rarr;PC (switch2 Gen/switch1 Rec) &middot; B: PC&rarr;esp32-3 (switch1 Gen/switch2 Rec)</span></h2>
-        <div class="grid2">
-          <div>
-            <div class="kv"><span class="k">switch2 (Generation)</span><span class="v" id="frerGenState">&mdash;</span></div>
-            <div class="kv"><span class="k">switch1 (Recovery)</span><span class="v" id="frerRecState">&mdash;</span></div>
-            <div class="kv"><span class="k">Gi1/2 STP</span><span class="v" id="stpState">&mdash;</span></div>
-          </div>
-          <div>
-            <div class="kv"><span class="k">Passed</span><span class="v tabular" id="frerPassed">&mdash;</span></div>
-            <div class="kv"><span class="k">Discarded</span><span class="v tabular" id="frerDiscarded">&mdash;</span></div>
-            <div class="kv"><span class="k">Out of order / Lost</span><span class="v tabular" id="frerOoo">&mdash;</span></div>
-          </div>
+        <h2>Protected flows <span class="hint">counters live on each flow's recovery end</span></h2>
+        <div style="overflow-x:auto;">
+          <table class="reqs">
+            <thead><tr><th>Flow</th><th>Passed</th><th>Discarded (duplicates removed)</th><th>Lost</th><th></th></tr></thead>
+            <tbody id="frerFlows"></tbody>
+          </table>
         </div>
+        <p class="hint" style="margin:14px 0 0;">Healthy looks like <strong>Passed &asymp; Discarded</strong> (every frame arrived twice, one copy dropped) with <strong>Lost&nbsp;=&nbsp;0</strong>. When one path is cut, Discarded stops climbing while Passed keeps going &mdash; that is the redundancy working, not a fault.</p>
+      </div>
+
+      <div class="card">
+        <h2>Ring paths <span class="hint">both links carry the protected stream simultaneously</span></h2>
+        <div id="ringPorts"></div>
+      </div>
+
+      <div class="card">
+        <h2>Controls</h2>
         <div class="btn-row">
           <button class="btn" id="btnReapply">Re-apply FRER config</button>
-          <button class="btn secondary" id="btnToggleGenActive">Toggle switch2 AdminActive</button>
-          <button class="btn secondary" id="btnToggleRecActive">Toggle switch1 AdminActive</button>
+          <button class="btn danger" id="btnCutGi12">Cut Gi1/2 (test redundancy)</button>
+          <button class="btn secondary" id="btnRestoreGi12">Restore Gi1/2</button>
         </div>
+        <p class="hint" style="margin:12px 0 0;">Cutting <strong>Gi1/2</strong> is the safe test &mdash; it carries only the FRER VLAN. Do not cut Gi1/1: it carries management, and shutting it isolates switch2.</p>
       </div>
     </section>
 
@@ -265,14 +275,49 @@
     </section>
 
     <section class="view" id="view-mux">
-      <h1>Multiplexing failover test</h1>
-      <p class="lede">admin-shuts Gi1/1 on switch2, watches the cutover</p>
+      <h1>Multiplexing (path redundancy)</h1>
+      <p class="lede">no spanning tree &mdash; both ring links carry every frame, the far end drops the duplicate</p>
+
       <div class="card">
-        <h2>Failover <span class="hint">reversible &mdash; no cable pulling. Verified worst-case gap: 0.51s</span></h2>
+        <h2>How it works here</h2>
+        <figure style="margin:0;">
+          <svg role="img" aria-label="Each frame leaves the source switch on both ring links and the destination switch eliminates the duplicate"
+               viewBox="0 0 660 200" style="max-width:100%;height:auto;color:var(--ink);">
+            <defs>
+              <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" fill="currentColor"/>
+              </marker>
+            </defs>
+            <rect x="20" y="70" width="110" height="58" rx="10" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            <text x="75" y="95" text-anchor="middle" font-size="12" fill="currentColor" font-weight="600">source</text>
+            <text x="75" y="112" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.6">generation</text>
+
+            <rect x="530" y="70" width="110" height="58" rx="10" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            <text x="585" y="95" text-anchor="middle" font-size="12" fill="currentColor" font-weight="600">destination</text>
+            <text x="585" y="112" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.6">recovery</text>
+
+            <path d="M130 88 C 250 30, 410 30, 530 88" fill="none" stroke="#0071e3" stroke-width="2" marker-end="url(#ar)"/>
+            <text x="330" y="36" text-anchor="middle" font-size="11" fill="#0071e3" font-weight="600">Gi 1/1 &mdash; copy 1 (R-tag seq n)</text>
+
+            <path d="M130 110 C 250 168, 410 168, 530 110" fill="none" stroke="#0071e3" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ar)"/>
+            <text x="330" y="186" text-anchor="middle" font-size="11" fill="#0071e3" font-weight="600">Gi 1/2 &mdash; copy 2 (same seq n)</text>
+
+            <text x="330" y="103" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.7">whichever arrives first is forwarded;</text>
+            <text x="330" y="118" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.7">the second is discarded by sequence number</text>
+          </svg>
+          <figcaption class="hint" style="margin-top:10px;">Because both copies are always in flight, losing one link costs <strong>zero</strong> frames &mdash; there is no detection delay and no reconvergence, which is exactly what spanning tree cannot give.</figcaption>
+        </figure>
+      </div>
+
+      <div class="card">
+        <h2>Live failover test <span class="hint">reversible, no cable pulling</span></h2>
+        <p style="margin:0 0 4px;font-size:0.88rem;">Shut <strong>Gi 1/2</strong> and watch the FRER table: <code>Passed</code> keeps climbing at the same rate while <code>Discarded</code> stops &mdash; there is simply no second copy left to throw away. <code>Lost</code> stays at 0.</p>
         <div class="btn-row">
-          <button class="btn danger" id="btnCutGi11">Shut Gi1/1 (switch2)</button>
-          <button class="btn secondary" id="btnRestoreGi11">Restore Gi1/1 (switch2)</button>
+          <button class="btn danger" id="btnCutGi12b">Shut Gi1/2 (switch2)</button>
+          <button class="btn secondary" id="btnRestoreGi12b">Restore Gi1/2</button>
         </div>
+        <p class="hint" style="margin:14px 0 0;"><strong>Never shut Gi 1/1.</strong> It is the only link carrying switch2's management VLAN &mdash; shutting it makes switch2 unreachable and needs a physical reboot. Gi 1/2 carries the FRER VLAN only, so it is the safe one to cut.</p>
+        <div id="muxFrer" style="margin-top:18px;"></div>
       </div>
     </section>
 
@@ -285,7 +330,9 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<!-- vendored locally: the testbed PC is often off the internet -->
+<script src="/static/vendor/cytoscape.min.js"></script>
+<script src="/static/vendor/chart.umd.min.js"></script>
 <script>
 const NODE_ORDER = ["esp32-1", "esp32-2", "esp32-3", "pc"];
 const NODE_LABEL = { "esp32-1": "ESP32-1 (Gi1/3)", "esp32-2": "ESP32-2 (Gi1/6)", "esp32-3": "ESP32-3 (Gi1/5, FRER)", "pc": "PC" };
@@ -437,24 +484,61 @@ function mstpBadge(port) {
   return st || "—";
 }
 
+function fmtNum(n) { return (n == null) ? "&mdash;" : Number(n).toLocaleString(); }
+
+function flowHealth(st) {
+  if (!st) return `<span class="badge info">no counters</span>`;
+  if (st.Passed === 0) return `<span class="badge crit">no traffic</span>`;
+  if (st.Discarded === 0) return `<span class="badge warn">single path only</span>`;
+  return `<span class="badge good">protected</span>`;
+}
+
 function renderFrer(state) {
-  const s1 = state.switches.switch1 || {}, s2 = state.switches.switch2 || {};
-  const genStatus = s2.frer?.status;
-  const recStatus = s1.frer?.status;
-  document.getElementById("frerGenState").textContent = genStatus
-    ? `${genStatus.OperState} · ${genStatus.WarningNone ? "0 warnings" : "warnings present"}`
-    : (s2.frer?.statusError ? "error" : "—");
-  document.getElementById("frerRecState").textContent = recStatus
-    ? `${recStatus.OperState} · ${recStatus.WarningNone ? "0 warnings" : "warnings present"}`
-    : (s1.frer?.statusError ? "error" : "—");
+  // every protected flow the backend knows about, counted at its recovery end
+  const flows = [];
+  for (const swName of ["switch1", "switch2"]) {
+    const f = state.switches[swName]?.frer || {};
+    for (const [id, flow] of Object.entries(f)) flows.push({ id, sw: swName, ...flow });
+  }
+  flows.sort((a, b) => a.inst - b.inst);
 
-  const gi12 = s2.ports?.["Gi 1/2"];
-  document.getElementById("stpState").innerHTML = mstpBadge(gi12);
+  const body = document.getElementById("frerFlows");
+  body.innerHTML = flows.length ? flows.map(f => {
+    const st = f.statistics, cfgWarn = f.status && !f.status.WarningNone;
+    return `<tr>
+      <td class="metric">${f.label}
+        <div class="hint">instance ${f.inst} on ${f.sw}${f.status ? " &middot; " + f.status.OperState : ""}</div></td>
+      <td class="current">${fmtNum(st?.Passed)}</td>
+      <td class="current">${fmtNum(st?.Discarded)}</td>
+      <td class="current" ${st?.Lost ? 'style="color:var(--warn)"' : ""}>${fmtNum(st?.Lost)}</td>
+      <td>${flowHealth(st)}${cfgWarn ? ' <span class="badge warn">cfg warning</span>' : ""}</td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="5" style="color:var(--muted)">no FRER instances reporting</td></tr>`;
 
-  const stats = s1.frer?.statistics;
-  document.getElementById("frerPassed").textContent = stats ? stats.Passed : "—";
-  document.getElementById("frerDiscarded").textContent = stats ? stats.Discarded : "—";
-  document.getElementById("frerOoo").textContent = stats ? `${stats.OutOfOrder} / ${stats.Lost}` : "—";
+  // ring paths: the two links that carry every protected frame
+  const rp = document.getElementById("ringPorts");
+  const cards = ["Gi 1/1", "Gi 1/2"].map(port => {
+    const a = state.switches.switch1?.ports?.[port] || {};
+    const b = state.switches.switch2?.ports?.[port] || {};
+    const up = a.link && b.link;
+    const lp = b.loopProtect;
+    return `<div class="card" style="margin:0;background:var(--card-2);box-shadow:none;">
+      <h2 style="margin-bottom:10px;">${port} <span class="badge ${up ? "good" : "crit"}">${up ? "link up both ends" : "link down"}</span></h2>
+      <div class="kv"><span class="k">switch1 ${port}</span><span class="v mono">${a.link ? String(a.speed||"up").replace("speed","") : "down"}</span></div>
+      <div class="kv"><span class="k">switch2 ${port}</span><span class="v mono">${b.link ? String(b.speed||"up").replace("speed","") : "down"}</span></div>
+      <div class="kv"><span class="k">spanning tree</span><span class="v">${mstpBadge(b)}</span></div>
+      <div class="kv"><span class="k">loop protect</span><span class="v">${lp ? `<span class="badge ${lp.disabled ? "crit" : "good"}">${lp.disabled ? "port disabled" : "armed"}</span>` : "&mdash;"}</span></div>
+    </div>`;
+  }).join("");
+  rp.innerHTML = `<div class="grid2">${cards}</div>`;
+
+  // the multiplexing view shows the same counters, since they are the proof
+  document.getElementById("muxFrer").innerHTML = `<table class="reqs">
+    <thead><tr><th>Flow</th><th>Passed</th><th>Discarded</th><th>Lost</th></tr></thead>
+    <tbody>${flows.map(f => `<tr><td class="metric">${f.label}</td>
+      <td class="current">${fmtNum(f.statistics?.Passed)}</td>
+      <td class="current">${fmtNum(f.statistics?.Discarded)}</td>
+      <td class="current">${fmtNum(f.statistics?.Lost)}</td></tr>`).join("")}</tbody></table>`;
 }
 
 function statusBlock(kind, text) { return `<span class="statusblock ${kind}">${text}</span>`; }
@@ -469,14 +553,75 @@ function latestRtt(node) {
   return null;
 }
 
+// ---- live RTT / jitter chart ----
+const CHART_COLORS = { "esp32-1": "#0071e3", "esp32-2": "#1a8a4a", "esp32-3": "#a8710a" };
+const MAX_POINTS = 90;
+let rttChart = null;
+
+function initRttChart() {
+  const ctx = document.getElementById("rttChart");
+  if (!ctx || typeof Chart === "undefined") return;
+  const css = getComputedStyle(document.documentElement);
+  const grid = css.getPropertyValue("--border").trim() || "#e5e5ea";
+  const muted = css.getPropertyValue("--muted").trim() || "#6e6e73";
+  const sets = [];
+  for (const n of ["esp32-1", "esp32-2", "esp32-3"]) {
+    // solid = one-way delay, dashed = jitter; no area fill, three overlapping
+    // translucent fills turn into an unreadable wash
+    sets.push({ label: `${n} delay`, data: [], borderColor: CHART_COLORS[n],
+                borderWidth: 2, pointRadius: 0, tension: 0.3, fill: false });
+    sets.push({ label: `${n} jitter`, data: [], borderColor: CHART_COLORS[n], borderWidth: 1.25,
+                borderDash: [3, 3], pointRadius: 0, tension: 0.3, fill: false });
+  }
+  rttChart = new Chart(ctx, {
+    type: "line",
+    data: { labels: [], datasets: sets },
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: muted, maxTicksLimit: 6, font: { size: 10 } } },
+        y: { beginAtZero: true, suggestedMax: 2.5, grid: { color: grid }, border: { display: false },
+             ticks: { color: muted, font: { size: 10 }, callback: v => v + " ms" },
+             title: { display: true, text: "one-way delay / jitter", color: muted, font: { size: 10 } } }
+      },
+      plugins: {
+        legend: { labels: { color: muted, boxWidth: 12, boxHeight: 2, font: { size: 10 }, usePointStyle: false } },
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.parsed.y?.toFixed(2)} ms` } }
+      }
+    }
+  });
+}
+
+function pushRttSample() {
+  if (!rttChart) return;
+  const t = new Date().toLocaleTimeString([], { hour12: false });
+  rttChart.data.labels.push(t);
+  ["esp32-1", "esp32-2", "esp32-3"].forEach((n, i) => {
+    const r = latestRtt(n);
+    rttChart.data.datasets[i * 2].data.push(r ? r.avgMs / 2 : null);   // one-way
+    rttChart.data.datasets[i * 2 + 1].data.push(r ? r.jitterMs : null);
+  });
+  if (rttChart.data.labels.length > MAX_POINTS) {
+    rttChart.data.labels.shift();
+    rttChart.data.datasets.forEach(d => d.data.shift());
+  }
+  rttChart.update("none");
+}
+
 function renderReqs(state) {
   state_nodes_cache = state.nodes || {};
   const rtts = ["esp32-1", "esp32-2", "esp32-3"].map(latestRtt).filter(Boolean);
   const oneWayMs = rtts.length ? Math.max(...rtts.map(r => r.avgMs)) / 2 : null;
   const jitterMs = rtts.length ? Math.max(...rtts.map(r => r.jitterMs)) : null;
 
-  const s1 = state.switches.switch1 || {};
-  const passedA = s1.frer?.statistics?.Passed ?? 0;
+  let passedA = 0, protectedFlows = 0;
+  for (const swName of ["switch1", "switch2"]) {
+    for (const f of Object.values(state.switches[swName]?.frer || {})) {
+      passedA += f.statistics?.Passed || 0;
+      if (f.statistics?.Discarded > 0) protectedFlows++;
+    }
+  }
   const nodeCount = Object.keys(state.nodes || {}).filter(k => k !== "pc").length;
 
   const rows = [
@@ -486,7 +631,7 @@ function renderReqs(state) {
       oneWayMs != null ? statusBlock(oneWayMs <= 5 ? "good" : "bad", oneWayMs <= 5 ? "MET" : "OVER") : statusBlock("warn", "NO DATA")],
     ["Edge&rarr;HPC 지터", "&le; 2.5 ms", jitterMs != null ? `≈${jitterMs.toFixed(2)} ms` : "&mdash;",
       jitterMs != null ? statusBlock(jitterMs <= 2.5 ? "good" : "bad", jitterMs <= 2.5 ? "MET" : "OVER") : statusBlock("warn", "NO DATA")],
-    ["다중화 (경로 이중화)", "2", `STP off both ports, FRER bidirectional, Passed=${passedA} (dir A live)`, statusBlock("good", "MET")],
+    ["다중화 (경로 이중화)", "2", `STP off, FRER bidirectional &middot; ${protectedFlows} flow(s) duplicating, ${passedA.toLocaleString()} frames recovered`, statusBlock(protectedFlows > 0 ? "good" : "warn", protectedFlows > 0 ? "MET" : "NO TRAFFIC")],
     ["가상 도메인 수", "8", "5 &middot; chassis/body/cabin(WiFi CSI)/diag&times;3", statusBlock("warn", "IN PROGRESS")],
   ];
   document.getElementById("reqsBody").innerHTML = rows.map(([metric, target, current, badge]) => `
@@ -530,6 +675,7 @@ function render(state) {
   renderReqs(state);
   renderNodeCards(state);
   renderFrer(state);
+  pushRttSample();
   renderSwitchControl("sw1PortsCtl", "switch1", state.switches.switch1);
   renderSwitchControl("sw2PortsCtl", "switch2", state.switches.switch2);
 
@@ -560,32 +706,22 @@ document.getElementById("btnReapply").addEventListener("click", async (ev) => {
   tick();
 });
 
-document.getElementById("btnToggleGenActive").addEventListener("click", async () => {
-  const s2 = (await api("/api/state")).switches.switch2;
-  const cur = s2.frer?.config?.AdminActive;
-  await api("/api/frer/active", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({switch:"switch2", active: !cur}) });
-  showToast(`switch2 FRER AdminActive -> ${!cur}`);
-  tick();
-});
 
-document.getElementById("btnToggleRecActive").addEventListener("click", async () => {
-  const s1 = (await api("/api/state")).switches.switch1;
-  const cur = s1.frer?.config?.AdminActive;
-  await api("/api/frer/active", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({switch:"switch1", active: !cur}) });
-  showToast(`switch1 FRER AdminActive -> ${!cur}`);
-  tick();
-});
 
-document.getElementById("btnCutGi11").addEventListener("click", async () => {
-  await api("/api/port/shutdown", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({switch:"switch2", port:"Gi 1/1", shutdown:true}) });
-  showToast("Gi1/1 shut on switch2 — watch the topology reroute");
-  tick();
-});
-document.getElementById("btnRestoreGi11").addEventListener("click", async () => {
-  await api("/api/port/shutdown", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({switch:"switch2", port:"Gi 1/1", shutdown:false}) });
-  showToast("Gi1/1 restored on switch2");
-  tick();
-});
+
+for (const [id, shut] of [["btnCutGi12", true], ["btnRestoreGi12", false], ["btnCutGi12b", true], ["btnRestoreGi12b", false]]) {
+  document.getElementById(id).addEventListener("click", async (ev) => {
+    ev.target.disabled = true;
+    try {
+      await api("/api/port/shutdown", { method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({switch:"switch2", port:"Gi 1/2", shutdown: shut}) });
+      showToast(shut ? "Gi1/2 shut — Discarded should freeze, Passed should keep climbing"
+                     : "Gi1/2 restored — duplicates resume within a second");
+    } catch (e) { showToast("Failed: " + e.message); }
+    ev.target.disabled = false;
+    tick();
+  });
+}
 
 // switch-control per-port action buttons (event delegation, since rows re-render every tick)
 document.addEventListener("click", async (ev) => {
@@ -608,6 +744,7 @@ document.addEventListener("click", async (ev) => {
   tick();
 });
 
+initRttChart();
 tick();
 setInterval(tick, 1000);
 </script>
