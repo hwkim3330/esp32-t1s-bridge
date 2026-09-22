@@ -204,7 +204,8 @@
 
       <div class="card">
         <h2>Topology <span class="hint">physical link (D10 port.status) vs. zenoh session, shown separately</span></h2>
-        <div id="topoNet" style="height:320px;"></div>
+        <div id="topoNet" style="height:300px;"></div>
+        <p class="hint" style="margin:10px 0 0;">The two heavy links between the switches are a <strong>pair</strong>, not a primary and a spare &mdash; every protected frame goes out both at the same instant. They are the only place in the path where a frame exists twice; each board and the PC receive exactly one copy.</p>
       </div>
 
       <div class="card" style="margin-top:20px;">
@@ -382,21 +383,25 @@ function stateColor(s) { return s === "up" ? COLOR.good : s === "warn" ? COLOR.w
 function stateLabel(s) { return s === "up" ? "live" : s === "warn" ? "link up, zenoh dead" : "no link"; }
 
 function initTopoNetwork() {
+  // Preset positions, not a layout algorithm: the point of this picture is
+  // that Gi1/1 and Gi1/2 are a PAIR carrying the same frames at the same
+  // time, and an auto-layout draws them as an incidental double edge.
   cy = cytoscape({
     container: document.getElementById("topoNet"),
     elements: {
       nodes: [
-        { data: { id: "pc", label: "PC\n192.168.100.50" } },
-        { data: { id: "sw1", label: "D10 #1\n192.168.100.1" } },
-        { data: { id: "sw2", label: "D10 #2\n192.168.100.2" } },
-        { data: { id: "esp32-1", label: "ESP32-1\nGi1/3" } },
-        { data: { id: "esp32-2", label: "ESP32-2\nGi1/6" } },
-        { data: { id: "esp32-3", label: "ESP32-3\nGi1/5 (FRER)" } },
+        { data: { id: "pc",      label: "PC\n192.168.100.50" },           position: { x:   0, y: 150 } },
+        { data: { id: "sw1",     label: "D10 #1\n192.168.100.1" },        position: { x: 190, y: 150 } },
+        { data: { id: "sw2",     label: "D10 #2\n192.168.100.2" },        position: { x: 480, y: 150 } },
+        { data: { id: "esp32-1", label: "ESP32-1\nGi1/3 · up vlan200" },  position: { x: 710, y:  60 } },
+        { data: { id: "esp32-2", label: "ESP32-2\nGi1/6 · up vlan201" },  position: { x: 710, y: 150 } },
+        { data: { id: "esp32-3", label: "ESP32-3\nGi1/5 · up vlan202" },  position: { x: 710, y: 240 } },
       ],
       edges: [
-        { data: { id: "pc-sw1", source: "pc", target: "sw1", label: "Gi1/6" } },
-        { data: { id: "sw1-sw2-a", source: "sw1", target: "sw2", label: "Gi1/1" } },
-        { data: { id: "sw1-sw2-b", source: "sw1", target: "sw2", label: "Gi1/2 (FRER)" }, classes: "dashed" },
+        { data: { id: "pc-sw1",    source: "pc",  target: "sw1", label: "Gi1/6" } },
+        // both solid, both the same weight: neither is a standby path
+        { data: { id: "sw1-sw2-a", source: "sw1", target: "sw2", label: "Gi1/1 · copy 1" }, classes: "ring up" },
+        { data: { id: "sw1-sw2-b", source: "sw1", target: "sw2", label: "Gi1/2 · copy 2" }, classes: "ring down" },
         { data: { id: "sw2-e1", source: "sw2", target: "esp32-1", label: "Gi1/3" } },
         { data: { id: "sw2-e2", source: "sw2", target: "esp32-2", label: "Gi1/6" } },
         { data: { id: "sw2-e3", source: "sw2", target: "esp32-3", label: "Gi1/5" } },
@@ -404,21 +409,26 @@ function initTopoNetwork() {
     },
     style: [
       { selector: "node", style: {
-          "shape": "round-rectangle", "width": 112, "height": 44,
+          "shape": "round-rectangle", "width": 128, "height": 46,
           "background-color": COLOR.neutral, "border-width": 0,
           "label": "data(label)", "text-wrap": "wrap", "text-valign": "center", "text-halign": "center",
-          "font-family": "Inter, sans-serif", "font-size": 11, "font-weight": 600, "color": "#ffffff",
+          "font-family": "Inter, sans-serif", "font-size": 10.5, "font-weight": 600, "color": "#ffffff",
       } },
       { selector: "edge", style: {
-          "width": 2.5, "line-color": COLOR.neutral, "curve-style": "bezier",
+          "width": 2, "line-color": COLOR.neutral, "curve-style": "bezier",
           "label": "data(label)", "font-family": "JetBrains Mono, monospace", "font-size": 9,
           "color": COLOR.ink, "text-background-color": "#f5f5f7", "text-background-opacity": 1,
           "text-background-padding": 3,
       } },
-      { selector: "edge.dashed", style: { "line-style": "dashed" } },
+      // the protected segment is drawn heavier, because it is the only place
+      // in the whole path where two copies of a frame exist at once
+      { selector: "edge.ring", style: { "width": 4, "curve-style": "unbundled-bezier" } },
+      { selector: "edge.up",   style: { "control-point-distances": [-44], "control-point-weights": [0.5] } },
+      { selector: "edge.down", style: { "control-point-distances": [ 44], "control-point-weights": [0.5] } },
     ],
-    layout: { name: "breadthfirst", directed: true, spacingFactor: 1.15, roots: "#pc" },
+    layout: { name: "preset", fit: true, padding: 46 },
     userZoomingEnabled: true, userPanningEnabled: true, boxSelectionEnabled: false,
+    autoungrabify: true,
   });
 }
 
@@ -434,18 +444,33 @@ function renderTopo(state) {
   cy.$id("sw1").style({ "background-color": swColor(s1) });
   cy.$id("sw2").style({ "background-color": swColor(s2) });
   cy.$id("pc").style({ "background-color": COLOR.good });
-
   for (const id of ["esp32-1", "esp32-2", "esp32-3"]) {
     cy.$id(id).style({ "background-color": stateColor(espState(nodes, id)) });
   }
 
   const linkColor = (up) => up ? COLOR.good : COLOR.bad;
   cy.$id("pc-sw1").style({ "line-color": COLOR.good });
-  cy.$id("sw1-sw2-a").style({ "line-color": linkColor(s1.ports?.["Gi 1/1"]?.link) });
-  cy.$id("sw1-sw2-b").style({ "line-color": linkColor(s1.ports?.["Gi 1/2"]?.link) });
   cy.$id("sw2-e1").style({ "line-color": linkColor(s2.ports?.["Gi 1/3"]?.link) });
   cy.$id("sw2-e2").style({ "line-color": linkColor(s2.ports?.["Gi 1/6"]?.link) });
   cy.$id("sw2-e3").style({ "line-color": linkColor(s2.ports?.["Gi 1/5"]?.link) });
+
+  // A ring link is only doing its job if frames are actually being eliminated
+  // at the far end; a link that is up but carrying nothing looks identical
+  // from port.status alone, and that is exactly what fooled us for an hour.
+  let dup = 0;
+  for (const sw of ["switch1", "switch2"]) {
+    for (const f of Object.values(state.switches[sw]?.frer || {})) dup += f.statistics?.Discarded || 0;
+  }
+  const dupLive = dup > (renderTopo._lastDup ?? -1);
+  renderTopo._lastDup = dup;
+
+  for (const [eid, port] of [["sw1-sw2-a", "Gi 1/1"], ["sw1-sw2-b", "Gi 1/2"]]) {
+    const up = s1.ports?.[port]?.link && s2.ports?.[port]?.link;
+    cy.$id(eid).style({
+      "line-color": up ? (dupLive ? COLOR.good : COLOR.warn) : COLOR.bad,
+      "line-style": up ? "solid" : "dashed",
+    });
+  }
 }
 
 function renderNodeCards(state) {

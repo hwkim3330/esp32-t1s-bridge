@@ -1,8 +1,7 @@
 """Bidirectional FRER (802.1CB) between the two Kontron D10s, done properly.
 
-Protects esp32-1 <-> PC in both directions, plus PC -> esp32-2, over the two
-D10s' parallel links (Gi1/1 + Gi1/2), with spanning tree off on both ring
-ports -- FRER alone provides the redundancy, which is the point: there is no
+Protects all three boards <-> PC, both directions, over the two D10s' parallel
+links (Gi1/1 + Gi1/2), with spanning tree off on both ring ports -- FRER alone provides the redundancy, which is the point: there is no
 detection delay and no reconvergence, so a cut costs zero frames.
 
 Everything here was learned the hard way against the real rig. The six
@@ -61,11 +60,18 @@ names alone:
 6. One recovery instance can only follow ONE sequence counter. Pointing
    several generation instances at a single recovery instance interleaves
    their independent R-tag sequences, and the recovery engine reports the
-   gaps as Lost -- 765 of them in one run, while ping showed 0% loss. The
-   same shape appears in miniature if HistoryLen is too tight for two paths
-   with different delays: at 8 it invented losses, at 32 (with
-   ResetTimeoutMsec 1000) Lost stays flat at 0. So: one source per FRER
-   VLAN, HistoryLen 32.
+   gaps as Lost -- 765 of them in one run, while ping showed 0% loss.
+
+   This is what shapes the VLAN plan. PC -> board is safe to share one FRER
+   VLAN, because each board is a different destination MAC and so gets its
+   own recovery stream and instance. board -> PC is not: every board sends
+   to the same PC MAC, so one shared recovery stream would match all three.
+   Each board's upstream flow therefore gets its own FRER VLAN, which is
+   what the recovery stream matches on.
+
+   The same shape appears in miniature if HistoryLen is too tight for two
+   paths with different delays: at 8 it invented losses, at 32 (with
+   ResetTimeoutMsec 1000) Lost stays flat at 0.
 
 Run this with Gi1/2 unplugged if you want zero risk while it applies;
 nothing here needs the second path to be live in order to be configured.
@@ -77,35 +83,51 @@ import urllib.request
 SWITCH1 = "http://192.168.100.1/json_rpc"  # PC side
 SWITCH2 = "http://192.168.100.2/json_rpc"  # ESP32 side
 
-FRER_VLAN = 200
+# Downstream (PC -> board) all shares one FRER VLAN: each board has a distinct
+# destination MAC, so each gets its own recovery stream and therefore its own
+# recovery instance. Upstream (board -> PC) cannot share, because every board
+# sends to the SAME destination MAC -- one recovery stream would match all
+# three and feed three interleaved sequence counters into one instance, which
+# reads out as a huge and completely fake Lost count (note 6). So upstream gets
+# one FRER VLAN per board, and the recovery stream tells them apart by VLAN.
+DOWN_VLAN = 200
 RING_PORTS = ["Gi 1/1", "Gi 1/2"]
 
 PC_MAC = "d4:5d:64:b2:5d:c3"
 PC_PORT_SW1 = "Gi 1/6"                     # PC hangs off switch1 here
 
-EDGE_MAC = "a6:cb:8f:e7:f0:bd"             # esp32-1
-EDGE_PORT_SW2 = "Gi 1/3"                   # verified against mac.status.fdb.full.get,
-# NOT guessed from RX-counter deltas -- an early guess of the wrong port here is
-# what made direction A look broken for hours.
 
-# Separate stream ids per role, because generation and recovery need
-# genuinely different match criteria (see notes 1 and 2 above). High ids to
-# stay clear of streams 1-6, which belong to an unrelated older project
-# still configured on these switches.
-STREAM_A_GEN, STREAM_A_REC = 10, 11        # direction A: edge -> PC
-STREAM_B_GEN, STREAM_B_REC = 12, 13        # direction B: PC -> edge
-INST_A, INST_B = 1, 2
+class Board:
+    """One edge board and the two protected flows that terminate on it.
 
-# A second protected flow, PC -> esp32-2. Note that only the PC -> board
-# direction can be added this way: the board -> PC direction would have to
-# reuse the generation instance that already matches dst=PC, and two sources
-# feeding one recovery instance interleave two independent R-tag sequences,
-# which shows up as a large and entirely fake Lost count (note 6). Protecting
-# esp32-2 -> PC as well needs its own FRER VLAN.
-EDGE2_MAC = "2a:84:85:80:9b:85"            # esp32-2
-EDGE2_PORT_SW2 = "Gi 1/6"
-STREAM_C_GEN, STREAM_C_REC = 14, 15
-INST_C = 10
+    Ports and MACs are verified against mac.status.fdb.full.get, NOT guessed
+    from RX-counter deltas -- an early guess of the wrong port is what made
+    direction A look broken for hours.
+
+    Stream and instance ids are pinned per board rather than derived, so that
+    re-running this does not renumber (and thus orphan) objects that are
+    already live on the switches.
+    """
+
+    def __init__(self, name, mac, port, up_vlan, down_inst, up_inst,
+                 down_gen, down_rec, up_gen, up_rec):
+        self.name, self.mac, self.port, self.up_vlan = name, mac, port, up_vlan
+        self.down_inst, self.up_inst = down_inst, up_inst
+        self.down_gen, self.down_rec = down_gen, down_rec
+        self.up_gen, self.up_rec = up_gen, up_rec
+
+
+#                 name       mac                  port      up   inst d/u  streams dg/dr/ug/ur
+BOARDS = [
+    Board("esp32-1", "a6:cb:8f:e7:f0:bd", "Gi 1/3", 200,  2,  1, 12, 13, 10, 11),
+    Board("esp32-2", "2a:84:85:80:9b:85", "Gi 1/6", 201, 10, 11, 14, 15, 16, 17),
+    Board("esp32-3", "a6:cb:8f:e9:88:45", "Gi 1/5", 202, 12, 13, 18, 19, 20, 21),
+]
+
+ALL_VLANS = sorted({DOWN_VLAN} | {b.up_vlan for b in BOARDS})
+
+# Instances 3-6 and VLAN 35 on these switches belong to an unrelated older
+# project. Nothing here touches them; the ids above stay clear of them.
 
 _openers = {}
 
@@ -150,10 +172,10 @@ def stream_conf(dmac, vlan=None):
     }
 
 
-def frer_conf(mode, stream_id, egress_ports):
+def frer_conf(mode, stream_id, egress_ports, vlan):
     conf = {
         "Mode": mode,                       # lower-case per /json_spec
-        "FrerVlan": FRER_VLAN, "EgressPorts": egress_ports,
+        "FrerVlan": vlan, "EgressPorts": egress_ports,
         # HistoryLen 8 is too tight for two paths whose copies interleave: the
         # vector algorithm then reports sequence gaps as Lost even though no
         # frame was actually lost (ping stayed at 0% while Lost climbed).
@@ -196,10 +218,12 @@ def set_matching(url, port, mode="dmac_dip"):
         rpc(url, "vcl.config.interface.vcl_cfg.set", [port, {"Matching": mode}])
 
 
-def set_vlan(url, port, add_vlans, egress_tagging, native=None):
+def set_vlan(url, port, add_vlans, egress_tagging, native=None, replace=False):
     cfg = rpc(url, "vlan.config.interface.get", [port])
     cfg["Mode"] = "hybrid"
-    cfg["HybridVlans"] = sorted(set(cfg["HybridVlans"]) | set(add_vlans))
+    # replace=True for the board ports, which ship as members of all 4095 VLANs;
+    # left alone they receive the flood of every other board's FRER VLAN too.
+    cfg["HybridVlans"] = sorted(add_vlans) if replace else sorted(set(cfg["HybridVlans"]) | set(add_vlans))
     cfg["HybridEgressTagging"] = egress_tagging
     if native is not None:
         cfg["HybridNativeVlan"] = native
@@ -216,79 +240,94 @@ def disable_stp(url, port):
 
 # ---------------------------------------------------------------------------
 def main():
-    print("--- ring ports: VLAN 200 tagged, dmac_dip, STP off ---")
+    print(f"--- ring ports: VLANs {ALL_VLANS} tagged, dmac_dip, STP off ---")
     for sw in (SWITCH1, SWITCH2):
         for p in RING_PORTS:
             set_matching(sw, p)
-            set_vlan(sw, p, [FRER_VLAN], "tagAll", native=1)   # note 3; native 1 keeps
-            # untagged loop-protection probes out of the FRER VLAN, where they would
-            # otherwise flood across both links and trip loop protection.
+            set_vlan(sw, p, ALL_VLANS, "tagAll", native=1)   # note 3; native 1 keeps
+            # untagged loop-protection probes out of the FRER VLANs, where they
+            # would otherwise flood across both links and trip loop protection.
             disable_stp(sw, p)
 
-    print("--- edge/host ports: VLAN 200 member, dmac_dip, untagged egress ---")
+    print("--- PC port: member of every FRER VLAN, untagged egress (note 4) ---")
     set_matching(SWITCH1, PC_PORT_SW1)
-    set_vlan(SWITCH1, PC_PORT_SW1, [1, FRER_VLAN], "untagAll")   # note 4
-    set_matching(SWITCH2, EDGE_PORT_SW2)
-    set_vlan(SWITCH2, EDGE_PORT_SW2, [1, FRER_VLAN], "untagAll")
+    set_vlan(SWITCH1, PC_PORT_SW1, [1] + ALL_VLANS, "untagAll")
 
-    print(f"--- VLAN {FRER_VLAN}: flooding ON (it IS the fan-out), learning OFF (note 5) ---")
+    print("--- board ports ---")
+    for b in BOARDS:
+        set_matching(SWITCH2, b.port)
+        # Only its own two VLANs: these ports ship as members of all 4095, which
+        # would hand every board the flood of every other board's FRER VLAN.
+        set_vlan(SWITCH2, b.port, [1, DOWN_VLAN, b.up_vlan], "untagAll", replace=True)
+        print(f"  {b.name:8} {b.port}  down=vlan{DOWN_VLAN}  up=vlan{b.up_vlan}")
+
+    print(f"--- VLANs {ALL_VLANS}: flooding ON (it IS the fan-out), learning OFF (note 5) ---")
     for sw in (SWITCH1, SWITCH2):
-        rpc(sw, "vlan.config.global.flooding.set", [FRER_VLAN, True])
-        rpc(sw, "mac.config.vlan.learn.set", [FRER_VLAN, {"Mode": False}])
+        for v in ALL_VLANS:
+            rpc(sw, "vlan.config.global.flooding.set", [v, True])
+            rpc(sw, "mac.config.vlan.learn.set", [v, {"Mode": False}])
 
-    print(f"\n--- direction A: {EDGE_PORT_SW2} (esp32-1) -> PC ---")
-    put_stream(SWITCH2, STREAM_A_GEN, stream_conf(PC_MAC))                    # gen: DMAC only
-    attach_stream(SWITCH2, EDGE_PORT_SW2, STREAM_A_GEN)
-    put_frer(SWITCH2, INST_A, frer_conf("generation", STREAM_A_GEN, RING_PORTS))
+    for b in BOARDS:
+        print(f"\n--- {b.name} ---")
 
-    put_stream(SWITCH1, STREAM_A_REC, stream_conf(PC_MAC, FRER_VLAN))         # rec: DMAC + VLAN
-    for p in RING_PORTS:
-        attach_stream(SWITCH1, p, STREAM_A_REC)
-    put_frer(SWITCH1, INST_A, frer_conf("recovery", STREAM_A_REC, [PC_PORT_SW1]))
+        # PC -> board: generate at switch1 on the PC port, recover at switch2
+        # on the board's port. Told apart from the other boards by DMAC.
+        # Recovery goes in FIRST, every time. A generation instance whose
+        # recovery counterpart does not exist yet floods a FRER VLAN that
+        # nothing absorbs, and the far switch floods it straight back across
+        # the ring -- the storm from note 5, in a window of a few hundred ms.
+        print(f"  PC -> {b.name}: vlan{DOWN_VLAN} inst{b.down_inst}")
+        put_stream(SWITCH2, b.down_rec, stream_conf(b.mac, DOWN_VLAN))       # rec: DMAC + VLAN
+        for p in RING_PORTS:
+            attach_stream(SWITCH2, p, b.down_rec)
+        put_frer(SWITCH2, b.down_inst,
+                 frer_conf("recovery", b.down_rec, [b.port], DOWN_VLAN))
 
-    print(f"--- direction B: PC -> {EDGE_PORT_SW2} (esp32-1) ---")
-    put_stream(SWITCH1, STREAM_B_GEN, stream_conf(EDGE_MAC))
-    attach_stream(SWITCH1, PC_PORT_SW1, STREAM_B_GEN)
-    put_frer(SWITCH1, INST_B, frer_conf("generation", STREAM_B_GEN, RING_PORTS))
+        put_stream(SWITCH1, b.down_gen, stream_conf(b.mac))                  # gen: DMAC only
+        attach_stream(SWITCH1, PC_PORT_SW1, b.down_gen)
+        put_frer(SWITCH1, b.down_inst,
+                 frer_conf("generation", b.down_gen, RING_PORTS, DOWN_VLAN))
 
-    put_stream(SWITCH2, STREAM_B_REC, stream_conf(EDGE_MAC, FRER_VLAN))
-    for p in RING_PORTS:
-        attach_stream(SWITCH2, p, STREAM_B_REC)
-    put_frer(SWITCH2, INST_B, frer_conf("recovery", STREAM_B_REC, [EDGE_PORT_SW2]))
+        # board -> PC: generate at switch2 on the board's port into that
+        # board's own FRER VLAN, recover at switch1 on the PC port. Told apart
+        # from the other boards by VLAN, since the DMAC is the PC either way.
+        print(f"  {b.name} -> PC: vlan{b.up_vlan} inst{b.up_inst}")
+        put_stream(SWITCH1, b.up_rec, stream_conf(PC_MAC, b.up_vlan))
+        for p in RING_PORTS:
+            attach_stream(SWITCH1, p, b.up_rec)
+        put_frer(SWITCH1, b.up_inst,
+                 frer_conf("recovery", b.up_rec, [PC_PORT_SW1], b.up_vlan))
 
-    print(f"--- direction C: PC -> {EDGE2_PORT_SW2} (esp32-2) ---")
-    set_matching(SWITCH2, EDGE2_PORT_SW2)
-    set_vlan(SWITCH2, EDGE2_PORT_SW2, [1, FRER_VLAN], "untagAll")
-    put_stream(SWITCH1, STREAM_C_GEN, stream_conf(EDGE2_MAC))
-    attach_stream(SWITCH1, PC_PORT_SW1, STREAM_C_GEN)
-    put_frer(SWITCH1, INST_C, frer_conf("generation", STREAM_C_GEN, RING_PORTS))
-
-    put_stream(SWITCH2, STREAM_C_REC, stream_conf(EDGE2_MAC, FRER_VLAN))
-    for p in RING_PORTS:
-        attach_stream(SWITCH2, p, STREAM_C_REC)
-    put_frer(SWITCH2, INST_C, frer_conf("recovery", STREAM_C_REC, [EDGE2_PORT_SW2]))
+        put_stream(SWITCH2, b.up_gen, stream_conf(PC_MAC))
+        attach_stream(SWITCH2, b.port, b.up_gen)
+        put_frer(SWITCH2, b.up_inst,
+                 frer_conf("generation", b.up_gen, RING_PORTS, b.up_vlan))
 
     # Single-port delivery entries on each recovery switch (note 5). Learning is
-    # off in this VLAN, so without these the recovery switch does not know where
-    # the destination lives and floods the recovered frame straight back across
-    # the ring -- which is a genuine broadcast storm, ~3M pkt/s/port, not a
+    # off in these VLANs, so without them the recovery switch does not know
+    # where the destination lives and floods the recovered frame straight back
+    # across the ring -- a real broadcast storm, ~3M pkt/s/port, not a
     # theoretical one. One port each: a multi-port entry here breaks the
     # opposite direction, whose frames arrive *from* those same ring ports.
-    print("--- static delivery entries (note 5) ---")
-    rpc(SWITCH1, "mac.config.fdb.static.add", [FRER_VLAN, PC_MAC, {"PortList": [PC_PORT_SW1]}])
-    rpc(SWITCH2, "mac.config.fdb.static.add", [FRER_VLAN, EDGE_MAC, {"PortList": [EDGE_PORT_SW2]}])
-    rpc(SWITCH2, "mac.config.fdb.static.add", [FRER_VLAN, EDGE2_MAC, {"PortList": [EDGE2_PORT_SW2]}])
+    print("\n--- static delivery entries (note 5) ---")
+    for b in BOARDS:
+        rpc(SWITCH2, "mac.config.fdb.static.add", [DOWN_VLAN, b.mac, {"PortList": [b.port]}])
+        rpc(SWITCH1, "mac.config.fdb.static.add", [b.up_vlan, PC_MAC, {"PortList": [PC_PORT_SW1]}])
 
     print("\n--- status ---")
-    for sw, name in ((SWITCH1, "switch1"), (SWITCH2, "switch2")):
-        for inst, label in ((INST_A, "dirA"), (INST_B, "dirB"), (INST_C, "dirC")):
-            st = rpc(sw, "frer.status.get", [inst])
-            warns = [k for k, v in st.items() if k.startswith("Warning") and k != "WarningNone" and v]
-            print(f"  {name} inst{inst} ({label}): {st['OperState']}, {warns or 'no warnings'}")
+    for b in BOARDS:
+        for sw, name, inst in ((SWITCH1, "switch1", b.down_inst), (SWITCH2, "switch2", b.down_inst),
+                               (SWITCH2, "switch2", b.up_inst), (SWITCH1, "switch1", b.up_inst)):
+            st = rpc(sw, "frer.status.get", [inst], quiet=True)
+            if not st:
+                print(f"  {name} inst{inst}: MISSING")
+                continue
+            warns = [k for k, v in st.items()
+                     if k.startswith("Warning") and k != "WarningNone" and v]
+            print(f"  {b.name:8} {name} inst{inst:<3} {st['OperState']}, {warns or 'no warnings'}")
 
     print("\nSave to startup when happy:")
     print("  icfg.control.copy.set runningConfig -> startupConfig")
-
 
 
 if __name__ == "__main__":

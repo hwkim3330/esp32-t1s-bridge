@@ -40,10 +40,24 @@ FRER_VLAN = 200
 # counters -- Generation rejects a port argument outright ("Ifindex must be
 # VTSS_IFINDEX_NONE in generation mode") -- so each entry names the switch
 # and egress port where that flow's recovery instance lives.
+# Every protected flow, counted at its own recovery end. Downstream
+# (PC -> board) shares FRER VLAN 200, since each board is a distinct
+# destination MAC; upstream needs one VLAN per board, because all three send
+# to the same PC MAC and would otherwise share a recovery instance -- three
+# interleaved sequence counters in one instance read out as a huge fake Lost.
 FRER_FLOWS = [
-    {"id": "a1", "label": "esp32-1 \u2192 PC", "inst": 1,  "switch": "switch1", "port": "Gi 1/6"},
-    {"id": "b1", "label": "PC \u2192 esp32-1", "inst": 2,  "switch": "switch2", "port": "Gi 1/3"},
-    {"id": "b2", "label": "PC \u2192 esp32-2", "inst": 10, "switch": "switch2", "port": "Gi 1/6"},
+    {"id": "d1", "label": "PC \u2192 esp32-1", "node": "esp32-1", "dir": "down",
+     "vlan": 200, "inst": 2,  "switch": "switch2", "port": "Gi 1/3"},
+    {"id": "u1", "label": "esp32-1 \u2192 PC", "node": "esp32-1", "dir": "up",
+     "vlan": 200, "inst": 1,  "switch": "switch1", "port": "Gi 1/6"},
+    {"id": "d2", "label": "PC \u2192 esp32-2", "node": "esp32-2", "dir": "down",
+     "vlan": 200, "inst": 10, "switch": "switch2", "port": "Gi 1/6"},
+    {"id": "u2", "label": "esp32-2 \u2192 PC", "node": "esp32-2", "dir": "up",
+     "vlan": 201, "inst": 11, "switch": "switch1", "port": "Gi 1/6"},
+    {"id": "d3", "label": "PC \u2192 esp32-3", "node": "esp32-3", "dir": "down",
+     "vlan": 200, "inst": 12, "switch": "switch2", "port": "Gi 1/5"},
+    {"id": "u3", "label": "esp32-3 \u2192 PC", "node": "esp32-3", "dir": "up",
+     "vlan": 202, "inst": 13, "switch": "switch1", "port": "Gi 1/6"},
 ]
 
 NODES = {
@@ -120,7 +134,8 @@ def _poll_switch(name: str, base_url: str, ports: list[str]):
         for flow in FRER_FLOWS:
             if flow["switch"] != name:
                 continue
-            entry = {"label": flow["label"], "inst": flow["inst"]}
+            entry = {"label": flow["label"], "inst": flow["inst"],
+                     "node": flow["node"], "dir": flow["dir"], "vlan": flow["vlan"]}
             try:
                 entry["status"] = rpc(base_url, "frer.status.get", [flow["inst"]])
             except RuntimeError as e:
