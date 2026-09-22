@@ -60,6 +60,18 @@ static const IPAddress kGateway(192, 168, 100, ESP_IP_LAST);  // no router; loop
 #define PONG_KEYEXPR "test/pong/esp32-" STR(NODE_ID)
 #define STATS_KEYEXPR "test/stats/esp32-" STR(NODE_ID)
 
+// ---- LED control: "on"/"off"/"toggle" payload, common to every board.
+// Right now driven from the Arduino Serial Monitor (led_control.h's
+// ledControlSerialPoll(), typed as "led on" etc.); this zenoh subscriber
+// is the same handler wired to the network instead, for whenever a real
+// sensor/actuator needs LAN-only control with no USB cable plugged in.
+#include "led_control.h"
+#define LED_KEYEXPR "cmd/esp32-" STR(NODE_ID) "/led"
+
+// ---- Embedded web server: LAN-only status/LED control, no PC/zenoh
+// needed. See web_server.h for why this works over the same W5500 link.
+#include "web_server.h"
+
 // ---- Virtual domains (KETI IVN 3세부 test metric: virtual domain count,
 // target 8; 4 here). Each ECU role publishes synthetic-but-labeled traffic
 // under its own domain -- no physical sensor needed for this metric, the
@@ -96,6 +108,7 @@ static z_owned_publisher_t s_cabin_csi_pub;
 static z_owned_publisher_t s_cabin_presence_pub;
 static z_owned_subscriber_t s_sub;
 static z_owned_subscriber_t s_pong_sub;
+static z_owned_subscriber_t s_led_sub;
 static bool s_zenoh_up = false;
 static uint32_t s_idx = 0;
 static uint32_t s_ping_seq = 0;
@@ -130,6 +143,24 @@ static void dataHandler(z_loaned_sample_t *sample, void *arg) {
   Serial.println(")");
 
   z_string_drop(z_string_move(&value));
+}
+
+static void ledHandler(z_loaned_sample_t *sample, void *arg) {
+  (void)arg;
+  z_owned_string_t value;
+  z_bytes_to_string(z_sample_payload(sample), &value);
+  char cmd[16] = {0};
+  size_t n = z_string_len(z_string_loan(&value));
+  if (n >= sizeof(cmd)) n = sizeof(cmd) - 1;
+  memcpy(cmd, z_string_data(z_string_loan(&value)), n);
+  cmd[n] = '\0';
+  z_string_drop(z_string_move(&value));
+
+  if (ledControlHandleCommand(cmd)) {
+    Serial.printf("[led] (zenoh) -> %s\n", ledControlGet() ? "on" : "off");
+  } else {
+    Serial.printf("[led] (zenoh) unrecognized command: '%s'\n", cmd);
+  }
 }
 
 static void pongHandler(z_loaned_sample_t *sample, void *arg) {
@@ -196,6 +227,16 @@ static bool startZenoh() {
   if (z_declare_subscriber(z_session_loan(&s_session), &s_pong_sub, z_view_keyexpr_loan(&pong_ke),
                             z_closure_sample_move(&pong_callback), NULL) < 0) {
     Serial.println("[zenoh] pong subscriber declare FAILED");
+    return false;
+  }
+
+  z_view_keyexpr_t led_ke;
+  z_view_keyexpr_from_str_unchecked(&led_ke, LED_KEYEXPR);
+  z_owned_closure_sample_t led_callback;
+  z_closure_sample(&led_callback, ledHandler, NULL, NULL);
+  if (z_declare_subscriber(z_session_loan(&s_session), &s_led_sub, z_view_keyexpr_loan(&led_ke),
+                            z_closure_sample_move(&led_callback), NULL) < 0) {
+    Serial.println("[zenoh] led subscriber declare FAILED");
     return false;
   }
 
@@ -270,6 +311,8 @@ void zenohBridgeSetup() {
     delay(10);
   }
 
+  ledControlSetup();
+
   if (!ethStart(kSck, kMiso, kMosi, kCs, /*pollPeriodMs=*/1, kLocalIP, kMask, kGateway)) {
     Serial.println("[eth] ethStart() failed");
   }
@@ -283,6 +326,8 @@ void zenohBridgeSetup() {
                 ethFullDuplex() ? "full" : "half", ethLocalIP().toString().c_str(),
                 ethMacAddress().c_str());
 
+  webServerSetup();
+
   // WiFi (cabin/CSI domain) after Ethernet is confirmed up: if the two are
   // going to fight over anything (memory, event loop, IRQs), better to
   // find out with a known-good Ethernet baseline already established.
@@ -290,6 +335,13 @@ void zenohBridgeSetup() {
 }
 
 void zenohBridgeLoop() {
+  // Ahead of every early-return below on purpose: LED control over serial
+  // has to keep working even when Ethernet/zenoh is down (which is exactly
+  // ESP32-1's current state) -- it's the "지금은 유아트로" path precisely
+  // because it doesn't depend on the network being up at all.
+  ledControlSerialPoll();
+  webServerLoop();
+
   csiLinkLoop();
 
   if (!ethLinkUp()) {

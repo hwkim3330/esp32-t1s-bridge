@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IVN Testbed Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Apple-tier: sidebar app shell, soft neutrals + one confident blue,
+     generous radius and whitespace, SF-style system font for structure,
+     JetBrains Mono for telemetry/data only. */
+  :root {
+    --bg: #f5f5f7;
+    --sidebar-bg: #fbfbfd;
+    --card: #ffffff;
+    --card-2: #f7f8fa;
+    --border: #e5e5ea;
+    --ink: #1d1d1f;
+    --muted: #6e6e73;
+    --accent: #0071e3;
+    --accent-ink: #0058b0;
+    --accent-bg: #e8f2fd;
+    --good: #1a8a4a;
+    --good-bg: #e6f7ec;
+    --warn: #a8710a;
+    --warn-bg: #fbf1d9;
+    --crit: #d13438;
+    --crit-bg: #fbe7e8;
+    --info: #48607a;
+    --info-bg: #eef2f6;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 1px 3px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.06);
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+  .tabular { font-variant-numeric: tabular-nums; }
+  code, .mono { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+  .shell { display: flex; min-height: 100vh; }
+
+  /* ---- sidebar ---- */
+  .sidebar {
+    width: 232px; flex: 0 0 232px; background: var(--sidebar-bg);
+    border-right: 1px solid var(--border); padding: 20px 14px;
+    display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
+  }
+  .brand { padding: 6px 10px 18px; }
+  .brand .name { font-size: 1.02rem; font-weight: 700; letter-spacing: -0.01em; }
+  .brand .sub { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
+  .navitem {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    appearance: none; border: none; background: none; cursor: pointer;
+    padding: 9px 12px; border-radius: 9px; font-size: 0.87rem; font-weight: 500;
+    color: var(--ink); font-family: inherit; margin-bottom: 2px;
+  }
+  .navitem:hover { background: var(--card-2); }
+  .navitem.active { background: var(--accent-bg); color: var(--accent-ink); font-weight: 600; }
+  .navitem .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+  .navitem.active .dot { background: var(--accent); }
+  .sidebar-footer { margin-top: auto; padding: 10px; }
+  .conn-pill {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 0.74rem; font-weight: 600;
+    padding: 5px 10px; border-radius: 100px; background: var(--good-bg); color: var(--good);
+  }
+  .conn-pill.bad { background: var(--crit-bg); color: var(--crit); }
+  .conn-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .updated-at { font-size: 0.68rem; color: var(--muted); margin-top: 8px; font-family: "JetBrains Mono", monospace; }
+
+  /* ---- content ---- */
+  .content { flex: 1; min-width: 0; padding: 28px 36px 64px; max-width: 1120px; }
+  .content h1 { font-size: 1.4rem; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .content .lede { font-size: 0.88rem; color: var(--muted); margin: 0 0 24px; }
+  section.view { display: none; }
+  section.view.active { display: block; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    box-shadow: var(--shadow-sm); padding: 22px 24px;
+  }
+  .card + .card { margin-top: 18px; }
+  .card h2 {
+    font-size: 0.95rem; font-weight: 600; margin: 0 0 16px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .card h2 .hint { font-size: 0.76rem; font-weight: 400; color: var(--muted); }
+
+  .statusblock {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 0.72rem; font-weight: 600;
+    padding: 4px 11px; border-radius: 100px; background: var(--good-bg); color: var(--good);
+  }
+  .statusblock.bad { background: var(--crit-bg); color: var(--crit); }
+  .statusblock.warn { background: var(--warn-bg); color: var(--warn); }
+  .statusblock.info { background: var(--info-bg); color: var(--info); }
+
+  #topoNet { background: transparent; }
+
+  table.reqs { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  table.reqs th, table.reqs td { padding: 11px 12px; text-align: left; }
+  table.reqs thead th {
+    font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 600;
+  }
+  table.reqs tbody tr + tr td { border-top: 1px solid var(--border); }
+  table.reqs td.metric { font-weight: 500; }
+  table.reqs td.target, table.reqs td.current { font-family: "JetBrains Mono", monospace; font-size: 0.8rem; color: var(--ink); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+  @media (max-width: 900px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; font-size: 0.88rem; border-bottom: 1px solid var(--border); }
+  .kv:last-child { border-bottom: none; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-weight: 500; text-align: right; }
+
+  .feed {
+    background: var(--card-2); color: var(--ink); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 14px; font-size: 0.8rem; line-height: 1.7; max-height: 200px; overflow-y: auto;
+    font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  .feed .row { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .feed .row .k { color: var(--accent-ink); margin-right: 8px; }
+  .feed .row .ago { color: var(--muted); margin-left: 8px; }
+  .feed .empty { color: var(--muted); font-style: italic; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 0.72rem; font-weight: 600;
+    padding: 4px 10px; border-radius: 100px; background: var(--good-bg); color: var(--good);
+  }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+  .badge.crit { background: var(--crit-bg); color: var(--crit); }
+  .badge.info { background: var(--info-bg); color: var(--info); }
+  .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  button.btn {
+    appearance: none; border: none; cursor: pointer; background: var(--accent); color: #fff;
+    font-size: 0.83rem; font-weight: 600; padding: 9px 18px; border-radius: 10px;
+    transition: opacity 0.15s ease, transform 0.08s ease; font-family: inherit;
+  }
+  button.btn:hover { opacity: 0.88; }
+  button.btn:active { transform: scale(0.97); }
+  button.btn.secondary { background: var(--card-2); color: var(--ink); border: 1px solid var(--border); }
+  button.btn.danger { background: var(--crit); }
+  button.btn.tiny { padding: 5px 11px; font-size: 0.74rem; border-radius: 7px; }
+  button.btn:disabled { opacity: 0.4; cursor: default; }
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+
+  table.ports { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  table.ports th, table.ports td { padding: 9px 10px; text-align: left; vertical-align: middle; }
+  table.ports thead th { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 600; }
+  table.ports tbody tr + tr td { border-top: 1px solid var(--border); }
+  table.ports td.mono { font-family: "JetBrains Mono", ui-monospace, Menlo, monospace; }
+  table.ports td.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  footer { text-align: center; font-size: 0.74rem; color: var(--muted); margin-top: 30px; }
+  footer a { color: var(--accent-ink); text-decoration: none; }
+  .toast {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 12px;
+    font-size: 0.82rem; box-shadow: var(--shadow-md); opacity: 0; pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease; z-index: 50;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
+
+  @media (max-width: 860px) {
+    .shell { flex-direction: column; }
+    .sidebar { width: 100%; flex: none; height: auto; position: static; flex-direction: row; overflow-x: auto; }
+    .brand, .sidebar-footer { display: none; }
+    .content { padding: 20px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <nav class="sidebar">
+    <div class="brand">
+      <div class="name">IVN Testbed</div>
+      <div class="sub">esp32-t1s-bridge</div>
+    </div>
+    <button class="navitem active" data-view="overview"><span class="dot"></span>Overview</button>
+    <button class="navitem" data-view="nodes"><span class="dot"></span>Nodes</button>
+    <button class="navitem" data-view="frer"><span class="dot"></span>FRER</button>
+    <button class="navitem" data-view="switches"><span class="dot"></span>Switch Control</button>
+    <button class="navitem" data-view="mux"><span class="dot"></span>Multiplexing</button>
+    <div class="sidebar-footer">
+      <span class="conn-pill" id="connPill">connecting&hellip;</span>
+      <div class="updated-at" id="updatedAt">&mdash;</div>
+    </div>
+  </nav>
+
+  <main class="content">
+
+    <section class="view active" id="view-overview">
+      <h1>Overview</h1>
+      <p class="lede">live, direct from the D10s + zenohd &mdash; not a sandboxed artifact</p>
+
+      <div class="card">
+        <h2>Topology <span class="hint">physical link (D10 port.status) vs. zenoh session, shown separately</span></h2>
+        <div id="topoNet" style="height:320px;"></div>
+      </div>
+
+      <div class="card" style="margin-top:20px;">
+        <h2>KETI IVN 3세부 요구사항 <span class="hint">6 official test metrics, not house numbers</span></h2>
+        <div style="overflow-x:auto;">
+          <table class="reqs">
+            <thead><tr><th>지표</th><th>목표</th><th>현재</th><th></th></tr></thead>
+            <tbody id="reqsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-nodes">
+      <h1>Nodes</h1>
+      <p class="lede">3 ESP32 boards + PC, live zenoh feed per node</p>
+      <div class="grid3" id="nodeCards"></div>
+    </section>
+
+    <section class="view" id="view-frer">
+      <h1>FRER (802.1CB)</h1>
+      <p class="lede">bidirectional, STP fully off on both ring ports &mdash; static-FDB duplication only</p>
+      <div class="card">
+        <h2>Status <span class="hint">A: esp32-3&rarr;PC (switch2 Gen/switch1 Rec) &middot; B: PC&rarr;esp32-3 (switch1 Gen/switch2 Rec)</span></h2>
+        <div class="grid2">
+          <div>
+            <div class="kv"><span class="k">switch2 (Generation)</span><span class="v" id="frerGenState">&mdash;</span></div>
+            <div class="kv"><span class="k">switch1 (Recovery)</span><span class="v" id="frerRecState">&mdash;</span></div>
+            <div class="kv"><span class="k">Gi1/2 STP</span><span class="v" id="stpState">&mdash;</span></div>
+          </div>
+          <div>
+            <div class="kv"><span class="k">Passed</span><span class="v tabular" id="frerPassed">&mdash;</span></div>
+            <div class="kv"><span class="k">Discarded</span><span class="v tabular" id="frerDiscarded">&mdash;</span></div>
+            <div class="kv"><span class="k">Out of order / Lost</span><span class="v tabular" id="frerOoo">&mdash;</span></div>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="btnReapply">Re-apply FRER config</button>
+          <button class="btn secondary" id="btnToggleGenActive">Toggle switch2 AdminActive</button>
+          <button class="btn secondary" id="btnToggleRecActive">Toggle switch1 AdminActive</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-switches">
+      <h1>Switch Control</h1>
+      <p class="lede">per-port link, STP, loop-protection status &mdash; and live controls</p>
+      <div class="grid2">
+        <div class="card">
+          <h2>switch1 <span class="hint mono" id="sw1Ip"></span></h2>
+          <table class="ports"><thead><tr><th>Port</th><th>Link</th><th>STP</th><th>Loop Protect</th><th></th></tr></thead><tbody id="sw1PortsCtl"></tbody></table>
+        </div>
+        <div class="card">
+          <h2>switch2 <span class="hint mono" id="sw2Ip"></span></h2>
+          <table class="ports"><thead><tr><th>Port</th><th>Link</th><th>STP</th><th>Loop Protect</th><th></th></tr></thead><tbody id="sw2PortsCtl"></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-mux">
+      <h1>Multiplexing failover test</h1>
+      <p class="lede">admin-shuts Gi1/1 on switch2, watches the cutover</p>
+      <div class="card">
+        <h2>Failover <span class="hint">reversible &mdash; no cable pulling. Verified worst-case gap: 0.51s</span></h2>
+        <div class="btn-row">
+          <button class="btn danger" id="btnCutGi11">Shut Gi1/1 (switch2)</button>
+          <button class="btn secondary" id="btnRestoreGi11">Restore Gi1/1 (switch2)</button>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      esp32-t1s-bridge &middot; served directly from this PC &middot;
+      <a href="https://github.com/hwkim3330/esp32-t1s-bridge" target="_blank" rel="noopener">hwkim3330/esp32-t1s-bridge</a>
+    </footer>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<script>
+const NODE_ORDER = ["esp32-1", "esp32-2", "esp32-3", "pc"];
+const NODE_LABEL = { "esp32-1": "ESP32-1 (Gi1/3)", "esp32-2": "ESP32-2 (Gi1/6)", "esp32-3": "ESP32-3 (Gi1/5, FRER)", "pc": "PC" };
+
+// ---- sidebar navigation ----
+document.querySelectorAll(".navitem").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".navitem").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll("section.view").forEach(s => s.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("view-" + btn.dataset.view).classList.add("active");
+    if (btn.dataset.view === "overview" && cy) cy.resize();
+  });
+});
+
+function showToast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function fmtAgo(s) {
+  if (s == null) return "never";
+  if (s < 1) return "just now";
+  if (s < 60) return `${s.toFixed(0)}s ago`;
+  return `${(s/60).toFixed(1)}m ago`;
+}
+
+const COLOR = { good: "#1a8a4a", bad: "#d13438", warn: "#a8710a", neutral: "#c7c7cc", ink: "#1d1d1f" };
+let cy = null;
+
+function espState(nodes, id) {
+  const n = nodes[id] || {};
+  if (n.phyLink === false) return "down";
+  if (n.zenohAlive) return "up";
+  if (n.phyLink === true) return "warn";
+  return "down";
+}
+function stateColor(s) { return s === "up" ? COLOR.good : s === "warn" ? COLOR.warn : COLOR.bad; }
+function stateLabel(s) { return s === "up" ? "live" : s === "warn" ? "link up, zenoh dead" : "no link"; }
+
+function initTopoNetwork() {
+  cy = cytoscape({
+    container: document.getElementById("topoNet"),
+    elements: {
+      nodes: [
+        { data: { id: "pc", label: "PC\n192.168.100.50" } },
+        { data: { id: "sw1", label: "D10 #1\n192.168.100.1" } },
+        { data: { id: "sw2", label: "D10 #2\n192.168.100.2" } },
+        { data: { id: "esp32-1", label: "ESP32-1\nGi1/3" } },
+        { data: { id: "esp32-2", label: "ESP32-2\nGi1/6" } },
+        { data: { id: "esp32-3", label: "ESP32-3\nGi1/5 (FRER)" } },
+      ],
+      edges: [
+        { data: { id: "pc-sw1", source: "pc", target: "sw1", label: "Gi1/6" } },
+        { data: { id: "sw1-sw2-a", source: "sw1", target: "sw2", label: "Gi1/1" } },
+        { data: { id: "sw1-sw2-b", source: "sw1", target: "sw2", label: "Gi1/2 (FRER)" }, classes: "dashed" },
+        { data: { id: "sw2-e1", source: "sw2", target: "esp32-1", label: "Gi1/3" } },
+        { data: { id: "sw2-e2", source: "sw2", target: "esp32-2", label: "Gi1/6" } },
+        { data: { id: "sw2-e3", source: "sw2", target: "esp32-3", label: "Gi1/5" } },
+      ],
+    },
+    style: [
+      { selector: "node", style: {
+          "shape": "round-rectangle", "width": 112, "height": 44,
+          "background-color": COLOR.neutral, "border-width": 0,
+          "label": "data(label)", "text-wrap": "wrap", "text-valign": "center", "text-halign": "center",
+          "font-family": "Inter, sans-serif", "font-size": 11, "font-weight": 600, "color": "#ffffff",
+      } },
+      { selector: "edge", style: {
+          "width": 2.5, "line-color": COLOR.neutral, "curve-style": "bezier",
+          "label": "data(label)", "font-family": "JetBrains Mono, monospace", "font-size": 9,
+          "color": COLOR.ink, "text-background-color": "#f5f5f7", "text-background-opacity": 1,
+          "text-background-padding": 3,
+      } },
+      { selector: "edge.dashed", style: { "line-style": "dashed" } },
+    ],
+    layout: { name: "breadthfirst", directed: true, spacingFactor: 1.15, roots: "#pc" },
+    userZoomingEnabled: true, userPanningEnabled: true, boxSelectionEnabled: false,
+  });
+}
+
+function renderTopo(state) {
+  if (!cy) {
+    if (typeof cytoscape === "undefined") return;
+    initTopoNetwork();
+  }
+  const nodes = state.nodes || {};
+  const s1 = state.switches.switch1 || {}, s2 = state.switches.switch2 || {};
+
+  const swColor = (sw) => sw.reachable === false ? COLOR.bad : COLOR.good;
+  cy.$id("sw1").style({ "background-color": swColor(s1) });
+  cy.$id("sw2").style({ "background-color": swColor(s2) });
+  cy.$id("pc").style({ "background-color": COLOR.good });
+
+  for (const id of ["esp32-1", "esp32-2", "esp32-3"]) {
+    cy.$id(id).style({ "background-color": stateColor(espState(nodes, id)) });
+  }
+
+  const linkColor = (up) => up ? COLOR.good : COLOR.bad;
+  cy.$id("pc-sw1").style({ "line-color": COLOR.good });
+  cy.$id("sw1-sw2-a").style({ "line-color": linkColor(s1.ports?.["Gi 1/1"]?.link) });
+  cy.$id("sw1-sw2-b").style({ "line-color": linkColor(s1.ports?.["Gi 1/2"]?.link) });
+  cy.$id("sw2-e1").style({ "line-color": linkColor(s2.ports?.["Gi 1/3"]?.link) });
+  cy.$id("sw2-e2").style({ "line-color": linkColor(s2.ports?.["Gi 1/6"]?.link) });
+  cy.$id("sw2-e3").style({ "line-color": linkColor(s2.ports?.["Gi 1/5"]?.link) });
+}
+
+function renderNodeCards(state) {
+  const el = document.getElementById("nodeCards");
+  const nodes = state.nodes || {};
+  el.innerHTML = NODE_ORDER.map(id => {
+    const n = nodes[id] || {};
+    const badge = n.phyLink === false
+      ? `<span class="badge crit">no link</span>`
+      : n.zenohAlive
+        ? `<span class="badge good">live</span>`
+        : `<span class="badge warn">link up, zenoh dead</span>`;
+    const feed = (n.recent && n.recent.length)
+      ? n.recent.slice().reverse().map(r => `<div class="row"><span class="k">${r.key.split("/").slice(-2).join("/")}</span>${escapeHtml(String(r.val)).slice(0,60)}<span class="ago">${fmtAgo(r.ago)}</span></div>`).join("")
+      : `<div class="empty">no samples seen yet</div>`;
+    return `
+      <div class="card">
+        <h2>${NODE_LABEL[id]} ${badge}</h2>
+        <div class="kv"><span class="k">IP</span><span class="v mono">${n.ip || "—"}</span></div>
+        <div class="kv"><span class="k">last zenoh sample</span><span class="v">${fmtAgo(n.lastSeenAgo)}</span></div>
+        <div class="feed" style="margin-top:10px;">${feed}</div>
+      </div>`;
+  }).join("");
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function mstpBadge(port) {
+  if (!port) return "—";
+  if (port.stpEnabled === false) return `<span class="badge info">STP off (always-fwd)</span>`;
+  const st = port.mstp?.state;
+  if (st === "forwarding") return `<span class="badge good">forwarding</span>`;
+  if (st === "discarding") return `<span class="badge info">discarding (standby, expected)</span>`;
+  return st || "—";
+}
+
+function renderFrer(state) {
+  const s1 = state.switches.switch1 || {}, s2 = state.switches.switch2 || {};
+  const genStatus = s2.frer?.status;
+  const recStatus = s1.frer?.status;
+  document.getElementById("frerGenState").textContent = genStatus
+    ? `${genStatus.OperState} · ${genStatus.WarningNone ? "0 warnings" : "warnings present"}`
+    : (s2.frer?.statusError ? "error" : "—");
+  document.getElementById("frerRecState").textContent = recStatus
+    ? `${recStatus.OperState} · ${recStatus.WarningNone ? "0 warnings" : "warnings present"}`
+    : (s1.frer?.statusError ? "error" : "—");
+
+  const gi12 = s2.ports?.["Gi 1/2"];
+  document.getElementById("stpState").innerHTML = mstpBadge(gi12);
+
+  const stats = s1.frer?.statistics;
+  document.getElementById("frerPassed").textContent = stats ? stats.Passed : "—";
+  document.getElementById("frerDiscarded").textContent = stats ? stats.Discarded : "—";
+  document.getElementById("frerOoo").textContent = stats ? `${stats.OutOfOrder} / ${stats.Lost}` : "—";
+}
+
+function statusBlock(kind, text) { return `<span class="statusblock ${kind}">${text}</span>`; }
+
+let state_nodes_cache = {};
+function latestRtt(node) {
+  const recent = (state_nodes_cache[node]?.recent) || [];
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const m = /avg=([\d.]+)ms.*jitter=([\d.]+)ms/.exec(recent[i].val || "");
+    if (m) return { avgMs: parseFloat(m[1]), jitterMs: parseFloat(m[2]) };
+  }
+  return null;
+}
+
+function renderReqs(state) {
+  state_nodes_cache = state.nodes || {};
+  const rtts = ["esp32-1", "esp32-2", "esp32-3"].map(latestRtt).filter(Boolean);
+  const oneWayMs = rtts.length ? Math.max(...rtts.map(r => r.avgMs)) / 2 : null;
+  const jitterMs = rtts.length ? Math.max(...rtts.map(r => r.jitterMs)) : null;
+
+  const s1 = state.switches.switch1 || {};
+  const passedA = s1.frer?.statistics?.Passed ?? 0;
+  const nodeCount = Object.keys(state.nodes || {}).filter(k => k !== "pc").length;
+
+  const rows = [
+    ["10G 백본 링크 수", "&ge; 3", "0 &middot; enp4s0 uplink is 1G today", statusBlock("info", "TODO")],
+    ["10Mbps 경량 엣지 단말 수", "&ge; 8", `${nodeCount} &middot; RJ45/100M now, T1S scale-out planned`, statusBlock("warn", "IN PROGRESS")],
+    ["Edge&rarr;HPC 지연", "&le; 5 ms", oneWayMs != null ? `≈${oneWayMs.toFixed(2)} ms (RTT/2)` : "&mdash;",
+      oneWayMs != null ? statusBlock(oneWayMs <= 5 ? "good" : "bad", oneWayMs <= 5 ? "MET" : "OVER") : statusBlock("warn", "NO DATA")],
+    ["Edge&rarr;HPC 지터", "&le; 2.5 ms", jitterMs != null ? `≈${jitterMs.toFixed(2)} ms` : "&mdash;",
+      jitterMs != null ? statusBlock(jitterMs <= 2.5 ? "good" : "bad", jitterMs <= 2.5 ? "MET" : "OVER") : statusBlock("warn", "NO DATA")],
+    ["다중화 (경로 이중화)", "2", `STP off both ports, FRER bidirectional, Passed=${passedA} (dir A live)`, statusBlock("good", "MET")],
+    ["가상 도메인 수", "8", "5 &middot; chassis/body/cabin(WiFi CSI)/diag&times;3", statusBlock("warn", "IN PROGRESS")],
+  ];
+  document.getElementById("reqsBody").innerHTML = rows.map(([metric, target, current, badge]) => `
+    <tr><td class="metric">${metric}</td><td class="target">${target}</td><td class="current">${current}</td><td>${badge}</td></tr>`).join("");
+}
+
+function loopBadge(lp) {
+  if (!lp) return "—";
+  if (lp.disabled) return `<span class="badge crit">disabled (loop!)</span>`;
+  if (lp.loopDetected) return `<span class="badge warn">loop detected</span>`;
+  return `<span class="badge good">clear${lp.loopCount ? ` (${lp.loopCount} past)` : ""}</span>`;
+}
+
+function renderSwitchControl(elId, swName, sw) {
+  const el = document.getElementById(elId);
+  const ports = sw?.ports || {};
+  const rows = Object.entries(ports).map(([name, p]) => {
+    const isRing = name === "Gi 1/1" || name === "Gi 1/2";
+    const stpOn = p.stpEnabled !== false;
+    return `
+    <tr>
+      <td class="mono">${name}</td>
+      <td>${p.link ? `<span class="badge good">up</span>` : `<span class="badge crit">down</span>`}</td>
+      <td>${mstpBadge(p)}</td>
+      <td>${loopBadge(p.loopProtect)}</td>
+      <td class="actions">
+        ${isRing ? `<button class="btn secondary tiny" data-act="stp" data-sw="${swName}" data-port="${name}" data-enable="${!stpOn}">${stpOn ? "Disable STP" : "Enable STP"}</button>` : ""}
+        <button class="btn secondary tiny" data-act="shutdown" data-sw="${swName}" data-port="${name}" data-shutdown="true">Shut</button>
+        <button class="btn secondary tiny" data-act="shutdown" data-sw="${swName}" data-port="${name}" data-shutdown="false">Restore</button>
+      </td>
+    </tr>`;
+  }).join("");
+  el.innerHTML = rows || `<tr><td colspan="5" style="color:var(--muted)">unreachable</td></tr>`;
+}
+
+function render(state) {
+  document.getElementById("updatedAt").textContent = state.updatedAt ? new Date(state.updatedAt).toLocaleTimeString() : "—";
+  document.getElementById("sw1Ip").textContent = state.switches.switch1?.ip || "192.168.100.1";
+  document.getElementById("sw2Ip").textContent = state.switches.switch2?.ip || "192.168.100.2";
+  renderTopo(state);
+  renderReqs(state);
+  renderNodeCards(state);
+  renderFrer(state);
+  renderSwitchControl("sw1PortsCtl", "switch1", state.switches.switch1);
+  renderSwitchControl("sw2PortsCtl", "switch2", state.switches.switch2);
+
+  const connPill = document.getElementById("connPill");
+  const bothReachable = state.switches.switch1?.reachable !== false && state.switches.switch2?.reachable !== false;
+  connPill.className = "conn-pill" + (bothReachable ? "" : " bad");
+  connPill.textContent = bothReachable ? "both switches reachable" : "a switch is unreachable";
+}
+
+async function tick() {
+  try {
+    const state = await api("/api/state");
+    render(state);
+  } catch (e) {
+    document.getElementById("connPill").className = "conn-pill bad";
+    document.getElementById("connPill").textContent = "backend unreachable";
+  }
+}
+
+document.getElementById("btnReapply").addEventListener("click", async (ev) => {
+  ev.target.disabled = true;
+  showToast("Re-applying FRER config…");
+  try {
+    const r = await api("/api/frer/reapply", { method: "POST" });
+    showToast(r.ok ? "FRER re-applied" : "FRER re-apply reported an error");
+  } catch (e) { showToast("Failed: " + e.message); }
+  ev.target.disabled = false;
+  tick();
+});
+
+document.getElementById("btnToggleGenActive").addEventListener("click", async () => {
+  const s2 = (await api("/api/state")).switches.switch2;
+  const cur = s2.frer?.config?.AdminActive;
+  await api("/api/frer/active", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({switch:"switch2", active: !cur}) });
+  showToast(`switch2 FRER AdminActive -> ${!cur}`);
+  tick();
+});
+
+document.getElementById("btnToggleRecActive").addEventListener("click", async () => {
+  const s1 = (await api("/api/state")).switches.switch1;
+  const cur = s1.frer?.config?.AdminActive;
+  await api("/api/frer/active", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({switch:"switch1", active: !cur}) });
+  showToast(`switch1 FRER AdminActive -> ${!cur}`);
+  tick();
+});
+
+document.getElementById("btnCutGi11").addEventListener("click", async () => {
+  await api("/api/port/shutdown", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({switch:"switch2", port:"Gi 1/1", shutdown:true}) });
+  showToast("Gi1/1 shut on switch2 — watch the topology reroute");
+  tick();
+});
+document.getElementById("btnRestoreGi11").addEventListener("click", async () => {
+  await api("/api/port/shutdown", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({switch:"switch2", port:"Gi 1/1", shutdown:false}) });
+  showToast("Gi1/1 restored on switch2");
+  tick();
+});
+
+// switch-control per-port action buttons (event delegation, since rows re-render every tick)
+document.addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const sw = btn.dataset.sw, port = btn.dataset.port, act = btn.dataset.act;
+  btn.disabled = true;
+  try {
+    if (act === "stp") {
+      const enable = btn.dataset.enable === "true";
+      await api("/api/stp/enable", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({switch:sw, port, enable}) });
+      showToast(`${sw} ${port}: STP ${enable ? "enabled" : "disabled"}`);
+    } else if (act === "shutdown") {
+      const shutdown = btn.dataset.shutdown === "true";
+      await api("/api/port/shutdown", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({switch:sw, port, shutdown}) });
+      showToast(`${sw} ${port}: ${shutdown ? "shut" : "restored"}`);
+    }
+  } catch (e) { showToast("Failed: " + e.message); }
+  btn.disabled = false;
+  tick();
+});
+
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

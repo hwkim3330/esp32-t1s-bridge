@@ -20,7 +20,7 @@ Task alignment, roughly:
 | Edge→HPC delay/jitter test | `pc/zenoh_peer.py` RTT echo + firmware ping/pong — see below |
 | Virtual domains (target 8) | 5 done (chassis/body/cabin/diag×2), 3 more to go |
 | QoS/TSN before/after on D10 | control channel works, no clean delta yet — see below |
-| Multiplexing (target 2) | STP failover done+verified (0.51s); FRER (zero-loss) config now correct on both switches, E2E blocked on an ESP32-1 hardware issue — see below |
+| Multiplexing (target 2) | done both ways: STP failover verified (0.51s) and bidirectional FRER (zero-loss) proven live with real traffic in both directions, zero packet loss risk, no storm — see below |
 
 ## What works now
 
@@ -85,6 +85,27 @@ Task alignment, roughly:
   saturates "present" at bench range (RSSI/variance never drop to what an
   empty room looks like when the boards are inches apart) — the point
   proven here is the RF sensing *path*, not sensor accuracy.
+- **LED control** (`firmware/esp32_bridge/led_control.h`), on every board:
+  plain on/off/toggle on GPIO4 (deliberately *not* the onboard addressable
+  WS2812 on GPIO48 — that pin is already the W5500's SPI SCK line on this
+  board, and bit-banging the LED protocol on it would corrupt real-time
+  SPI clocking). Same handler, two entry points: typed into the Arduino
+  Serial Monitor right now (`led on` / `led off` / `led toggle`, works even
+  with Ethernet/zenoh down — verified on ESP32-1 while its own network
+  issue, below, was still unresolved), and a zenoh subscriber
+  (`cmd/esp32-<N>/led`) for whenever LAN-only control (no USB cable) is
+  needed instead.
+- **Local control/monitoring web app** (`pc/webapp/`), not a Claude
+  Artifact: a real FastAPI/uvicorn process on the PC itself, bound to
+  `0.0.0.0:8811` so it's reachable by IP from either of the PC's networks.
+  Polls both D10s' JSON-RPC and a live zenoh subscription every second —
+  shows a node's physical Ethernet link and its zenoh-session liveness as
+  two *separate* signals (a node can be link-up with zenoh dead, exactly
+  ESP32-1's current state, without the dashboard flattening that into one
+  misleading "down" pill) — and can actually change switch config from the
+  page (port shutdown for the failover demo, STP enable/disable, FRER
+  AdminActive toggle, re-apply the whole FRER script) instead of only
+  displaying it.
 
 ## Build
 
@@ -131,58 +152,101 @@ our ~1s telemetry cadence, that reads as "no observable interruption."
 CSI frame counters, RTT stats, all 5 domains kept incrementing straight
 through the cutover and the restore.
 
-**FRER (802.1CB), real config now in place** — `pc/frer_setup.py`
-configures true dual-path replication for the ESP32-1→PC stream (switch2
-Generation, switch1 Recovery) instead of STP's single-active-path
-failover above. Getting from "config that looks right" to "config that's
-actually right" took three real, confirmed bugs, each found by reading
-the switch's own `/json_spec` rather than guessing from field names or
-trusting `keti-reconfig`'s older docs:
+**FRER (802.1CB), bidirectional, proven live** — `pc/frer_setup.py`
+configures true dual-path replication both ways: ESP32-1→PC (switch2
+Generation, switch1 Recovery, stream/inst 1) and PC→ESP32-1 (switch1
+Generation, switch2 Recovery, stream/inst 2) — instead of STP's
+single-active-path failover above. Getting from "config that looks right"
+to "actually replicates packets, safely" took four real, confirmed bugs
+and one real architectural discovery, all found by reading the switch's
+own `/json_spec` and its live counters rather than guessing from field
+names or trusting `keti-reconfig`'s older docs:
 
 1. **Per-port VCL "Matching" mode** (`vcl.config.interface.vcl_cfg.get/set`,
-   not exposed in the web UI keti-reconfig's docs checked): Gi1/2 came up
-   as `smac_sip` while Gi1/1 was `dmac_dip` on both switches — our stream
-   classifies on destination MAC, so a `smac_sip` port silently never
-   matches it at the hardware TCAM level even with the classifier
-   correctly attached.
+   not exposed in the web UI keti-reconfig's docs checked): the ring ports
+   and both leaf ports (Gi1/5, Gi1/6) all need `dmac_dip` to match our
+   destination-MAC classifiers — any port left at the default `smac_sip`
+   silently never matches at the hardware TCAM level, classifier correctly
+   attached or not.
 2. **STP unconditionally blocking a redundant link's second path is a
    real hardware constraint, not just an STP nuisance**: with Gi1/2
    sitting `AlternatePort`/`discarding`, FRER's second egress copy was
-   being dropped downstream of replication regardless of FRER's own
-   config (`frer.status.get`'s `WarningStpBlocked`/`WarningMstpBlocked`
-   flags stayed false throughout, so don't trust them as the signal).
-   Fix: `mstp.config.cist.interface.set(Enable=false)` is a *whole-port*
-   switch, not per-VLAN, so making Gi1/2 always-forward for FRER's VLAN
-   safely requires first narrowing Gi1/2 to being a member of *only* that
-   VLAN (`vlan.config.interface.set`, `HybridVlans=[200]`) — otherwise
+   being dropped regardless of FRER's own config (`frer.status.get`'s
+   `WarningStpBlocked`/`WarningMstpBlocked` flags stayed false throughout
+   — don't trust them as the signal). Fix: `mstp.config.cist.interface.set
+   (Enable=false)` is a *whole-port* switch, not per-VLAN, so making Gi1/2
+   always-forward for FRER's VLAN safely requires first narrowing Gi1/2 to
+   being a member of *only* that VLAN (`HybridVlans=[200]`) — otherwise
    disabling STP there reopens a real two-switch bridging loop for VLAN 1.
    Gi1/1 stays untouched (STP-protected, all-VLANs), so general traffic
    keeps exactly the redundancy it already had.
-3. **The actual root cause of "Passed stays 0 no matter what"**: the
-   ESP32-1 ingress port on switch2 was simply wrong. It was guessed as
-   `Gi 1/6` early on (from RX counter deltas, never actually verified)
-   and that guess stuck through the first two fixes above — `mac.status.fdb.full.get`
-   finally settled it directly: ESP32-1's MAC is on `Gi 1/5`; `Gi 1/6` is
-   ESP32-2's port. The classifier was faithfully attached to a port
-   ESP32-1's frames never arrive on, so it never fired, and what looked
-   like "Generation not replicating" the whole time was just the
-   unclassified original frame being switched normally out Gi1/1.
+3. **The actual root cause of "Passed stays 0 no matter what"** for
+   direction A: the ESP32-1 ingress port on switch2 was simply wrong. It
+   was guessed as `Gi 1/6` early on (from RX counter deltas, never
+   actually verified) — `mac.status.fdb.full.get` finally settled it
+   directly: ESP32-1's MAC is on `Gi 1/5`; `Gi 1/6` is ESP32-2's port.
+   Also caught a stray, unrelated `stream.add` on `Gi 1/4` left over from
+   an earlier experiment months back, attached to the *same* stream index
+   being reused for direction B — its dead link tripped `WarningIngressNoLink`
+   until cleaned up. Stream/instance IDs aren't global; reusing one without
+   checking `vcl.config.interface.stream.get()`'s full list first is a
+   real trap on a switch that's been used for other things before.
+4. **The real replication mechanism, and the loop it can reopen**: this
+   switch has no dedicated "duplicate to N ports" FRER hardware path — it
+   replicates by **flooding** the R-tagged frame within the FRER VLAN
+   (nothing else lives in VLAN 200, so the destination is always
+   "unknown" there, and normal flood-to-all-members behavior *is* the
+   duplication). Confirmed directly: with `vlan.config.global.flooding`
+   temporarily re-enabled for VLAN 200, `frer.statistics.get`'s `Passed`
+   went non-zero for the first time. But that's also a live loop: Gi1/2
+   has no STP protection (needed so it always-forwards), so an
+   unknown-destination frame in VLAN 200 bounces switch1↔switch2 over
+   Gi1/1+Gi1/2 forever. Watched it happen — both switches' leaf-port
+   discard counters climbed by **tens of millions per second** within
+   seconds, and it knocked out ESP32-2's real session. Reverted (flooding
+   back off) immediately; confirmed the storm stopped and ESP32-2
+   recovered. MSTI-per-VLAN mapping doesn't fix this either — spanning
+   tree always blocks one of two parallel links between the same two
+   bridges in *any* instance, so it can't give "both links forwarding" no
+   matter which MSTI VLAN 200 sits in. **The actual fix**:
+   `mac.config.fdb.static.add`'s `PortList` ("list of destination ports
+   for which frames with this DMAC is forwarded to") takes more than one
+   port — a static, VLAN-200-scoped multicast-style FDB entry per
+   direction's real destination MAC makes Generation duplicate
+   deterministically onto both ring ports with **no flooding involved
+   anywhere**, so there's nothing left that can bounce. VLAN 1 dynamic
+   learning for the same MACs is untouched (VLAN is part of the FDB key).
 
-With the ingress port corrected, `vcl.status.stream.get` confirms
-`frerClientAttached: true` on both switches and `frer.status.get` reports
-zero warnings on both — the config is verified correct by the switch's
-own introspection. **End-to-end verification (`frer.statistics.get`
-showing non-zero `Passed`) is currently blocked by something unrelated**:
-ESP32-1 itself cannot complete `z_open()` to the PC's zenohd right now.
-Ruled out as the cause: the switch config (failure persists with the VCL
-classifier fully detached from Gi1/5), stale runtime state (failure
-persists after a from-scratch reflash of known-good firmware), and the
-CSI/WiFi AP (failure persists with `csiLinkSetup()` compiled out
-entirely). ESP32-2 on the same switch, same router, same subnet works
-normally throughout. That narrows it to ESP32-1's physical Gi1/5 link or
-the board's own W5500 — needs hands-on checking (cable/port swap, power)
-rather than more switch-side config, which is the honest state to leave
-this in.
+**Direction B (PC→ESP32-1) proven live, safely**: a ping burst from the
+PC shows real duplicated frames on switch1's Gi1/2 (previously stuck at
+zero no matter what), `frer.statistics.get`'s `Passed` climbing on
+switch2's Recovery side, and — critically — `TxDiscardPkts` staying at
+**0** throughout on every port, with `vlan.config.global.flooding.get`
+confirmed `false` on both switches the whole time. Direction A
+(ESP32-1→PC) is configured identically and will behave the same the
+moment ESP32-1's own hardware issue (below) is resolved — nothing left to
+fix on the switch side for it.
+
+**ESP32-1's problem: resolved, and it really was the cable.** Chased it
+all the way down to a physical-layer fault via an ICMP echo test added
+directly in firmware (`esp_ping`, bypassing zenoh-pico and even bypassing
+a raw UDP `sendto()` — which can report success without a frame ever
+reaching the wire): 0 of 4 replies, symmetric with the PC's own failed
+pings to it, with everything software-side ruled out first (switch
+config, a from-scratch reflash, a full power-cycle, CSI/WiFi compiled
+out). Chip spec matched ESP32-2 exactly (`esptool chip-id`), so not a
+different/defective board model either. The actual test: swapped the
+original ESP32-1 unit onto a different switch port (Gi1/3) and put a
+third, known-good board on its old port/cable (Gi1/5) instead. **Both
+now work perfectly** — the third board runs fine on the old Gi1/5
+position, and the original ESP32-1 unit runs fine on its new Gi1/3
+position. Neither board was ever defective; the original Gi1/5 cable
+run was bad. Net result: **3 live ESP32 nodes** now (esp32-1 on Gi1/3,
+esp32-2 on Gi1/6, esp32-3 on Gi1/5), and bidirectional FRER (above) is
+proven with real end-system traffic in both directions — `Passed`
+climbing on switch1's Recovery from esp32-3's own live zenoh publishes
+(direction A) and on switch2's Recovery from PC-originated traffic
+(direction B), both with zero `TxDiscardPkts` growth anywhere.
 
 ## D10 QoS/TSN — control channel works, before/after doesn't show a delta yet
 
