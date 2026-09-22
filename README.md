@@ -4,8 +4,9 @@ An Edge/HPC testbed for KETI's IVN 3세부 과제 (SDV network architecture:
 Multi-GigE backbone + 10Mbps lightweight edge Ethernet, DDS, QoS/TSN,
 virtual domains). ESP32-S3 boards stand in for virtual ECUs on the edge
 side, talking [Zenoh](https://zenoh.io/) over Ethernet (W5500 now,
-10BASE-T1S planned) through a Kontron D10 switch to a PC/HPC that will run
-the Zenoh↔DDS bridge and Fast DDS. Split off from
+10BASE-T1S planned) through two Kontron D10 switches (dual-linked, for
+path redundancy) to a PC/HPC running the Zenoh↔DDS bridge and Fast DDS.
+Split off from
 [`aurix-tc4d7`](https://github.com/hwkim3330/aurix-tc4d7), whose AURIX side
 is separately blocked on an immature OpenOCD dev build.
 
@@ -19,7 +20,7 @@ Task alignment, roughly:
 | Edge→HPC delay/jitter test | `pc/zenoh_peer.py` RTT echo + firmware ping/pong — see below |
 | Virtual domains (target 8) | 5 done (chassis/body/cabin/diag×2), 3 more to go |
 | QoS/TSN before/after on D10 | control channel works, no clean delta yet — see below |
-| Multiplexing (target 2) | not started — needs a second D10 |
+| Multiplexing (target 2) | done, STP-level: 2 D10s dual-linked, automatic failover verified — see below |
 
 ## What works now
 
@@ -110,6 +111,37 @@ silence. Cost an afternoon to find once already.
 The static IP / peer address in `zenoh_bridge.cpp` (`kLocalIP`,
 `PC_LOCATOR`) matches whatever segment the board is currently plugged
 into — check those before flashing onto a different network.
+
+## Multiplexing — 2 D10s, dual-linked, verified failover
+
+A second Kontron D10 (192.168.100.2) now sits between the ESP32 boards and
+the first one (192.168.100.1, which carries the PC), joined by **two**
+parallel 1G links (Gi1/1, Gi1/2 on both switches). MSTP already elects one
+as active and the other as standby (`AlternatePort`/`discarding`) on its
+own — a real second path, not yet FRER's zero-loss kind, but genuine,
+safe, and already there.
+
+`pc/redundancy_failover_test.py` admin-shuts the currently active
+inter-switch link via `port.config.set` (remotely reversible — no cable
+pulling needed, and switch2 stays reachable throughout since its own
+management traffic reroutes the same way), watches `test/stats/**`
+through the cutover, then restores it. Verified on the real rig:
+**longest gap between samples across the entire failover: 0.51s** — at
+our ~1s telemetry cadence, that reads as "no observable interruption."
+CSI frame counters, RTT stats, all 5 domains kept incrementing straight
+through the cutover and the restore.
+
+FRER (true zero-loss, no STP reconvergence wait at all) is the fancier
+version of this and is a known, do-able next step —
+`keti-reconfig/docs/D10_SWITCH_REFERENCE.md` and `d10-tsn-manager`'s
+`96ee0ae` commit have the working recipe (`vcl.config.stream.add` with
+`protocol:"ANY"` uppercase, `vcl.config.interface.stream.add` to attach
+the ingress classifier, `frer.config.add` with unused `StreamId0..7` set
+to `0` not `-1`). Not done here yet because it needs disabling STP on
+these same two ports, and with only two switches and two direct links
+between them, that's a genuine 2-node loop — worth doing carefully
+(storm-control safety net first, console open) rather than blind, per
+that doc's own warning from an earlier ring topology.
 
 ## D10 QoS/TSN — control channel works, before/after doesn't show a delta yet
 
