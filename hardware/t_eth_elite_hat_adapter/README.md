@@ -1,187 +1,248 @@
-# T-ETH-Elite ↔ Raspberry Pi HAT pass-through adapter
+# T-ETH-Elite → Raspberry Pi HAT adapter
 
-A passive, 40-pin, pin-1-to-pin-1 adapter board. It lets a genuine Raspberry Pi
-HAT — specifically the one this was built for, **TSN Lab's Microchip
-LAN8650-based "10Base-T1S HAT"** (devicemart.co.kr #15980354, Raspberry-Pi-only
-by design) — physically and electrically plug onto a
+A passive spacer/notch board that lets a real Raspberry Pi HAT — specifically
+TSN Lab's **10BASE-T1S HAT (LAN8651)** — sit on a
 [LilyGO T-ETH-Elite](https://github.com/Xinyuan-LilyGO/LilyGO-T-ETH-Series)
-(an ESP32-S3 dev board) instead of a real Raspberry Pi.
+(ESP32-S3) instead of on a Pi.
 
-No signal remapping, no ICs, no passives: **2 connectors + 4 mounting holes**,
-nothing else. See "Why no routed traces" below for the one place this
-deviates from a literal wire-for-wire layout, and why.
+One connector, six mounting holes, two tool-access holes, **no traces, no
+zones, no nets**. Every number on the board comes from
+[`GEOMETRY.md`](GEOMETRY.md), which was measured from LilyGo's own DXF and 3D
+CAD and cross-checked against two more independent sources. That file is the
+source of truth; the board is generated from it by
+[`make_board.py`](make_board.py).
 
-## Why this works at all
+![board](preview.png)
 
-1. **The T-ETH-Elite's 40-pin header already matches the standard Raspberry Pi
-   GPIO header 1:1.** LilyGO's own official schematic
-   (`schematic/T-ETH-ELite.pdf`, github.com/Xinyuan-LilyGO/LilyGO-T-ETH-Series)
-   contains a table titled "Raspberry Pi PinOUT" (sourced from pinout.xyz)
-   mapping all 40 physical header pins to the standard RPi GPIO function
-   (SPI0 MOSI/MISO/SCLK/CE0/CE1, I2C, UART, PCM, EEPROM ID pins, 3V3/5V/GND).
-   LilyGO wired their ESP32-S3's GPIOs internally so the header's external
-   behavior is byte-for-byte a real Pi header. The TSN Lab HAT expects
-   standard RPi SPI0 + GPIO25 (IRQ) + GPIO7 (nCE1) + a couple of GPIOs for a
-   bus-node-ID selector — all present at the same pin numbers on the
-   T-ETH-Elite. Net result: pin N on one side is pin N on the other, for
-   N = 1..40, no exceptions.
-2. **The mechanical layout is copied verbatim from KiCad's own official
-   Raspberry-Pi-HAT project template**
-   (`/usr/share/kicad/template/RaspberryPi-HAT/`), not re-derived:
-   - 4 mounting holes, `MountingHole:MountingHole_2.7mm_M2.5` (2.7 mm
-     drill, M2.5 clearance), at absolute (161.5, 47.5), (103.5, 96.5),
-     (103.5, 47.5), (161.5, 96.5) mm — a 58 × 49 mm rectangle, which is the
-     official HAT mounting-hole spec.
-   - Board outline: the exact `gr_line`/`gr_arc` Edge.Cuts segments from the
-     template, same absolute coordinates — the ~65 × 56.5 mm rounded-corner
-     HAT shape, display-cable and camera-cable notches included, even though
-     this board has no display/camera connectors of its own (harmless, and
-     it means the outline is provably identical to the reference, not an
-     approximation).
-   - Header position: (103.5, 47.5) + (4.87, 1.27) = (108.37, 48.77) mm,
-     exactly the template's own GPIO connector position.
-3. **Net names are copied from the template's own net table**
-   (`RaspberryPi-HAT.kicad_pcb`, nets 1–31), so the schematic's 40 labels
-   read `+3V3`, `+5V`, `GND`, `GPIO2{slash}SDA1`, `ID_SDA`, etc. — the exact
-   same strings the template uses (the `{slash}` is KiCad's own escaping of
-   a literal `/` in a net name; it round-trips through KiCad correctly and
-   is not something this project invented).
+## Why this board exists at all
 
-## Concentric header/socket placement
+Not for pin mapping. The T-ETH-Elite's 40-pin header is already a Raspberry Pi
+header, and — this is the part worth stating plainly — **its geometry already
+matches the Pi's too**. Deriving the Pi near-hole positions from the header
+alone (field centre 32.326 ± 29.0, y = the header centre 4.63) gives
+(3.326, 4.63) and (61.326, 4.63); the Elite's own bottom mounting holes are at
+(3.33, 4.63) and (61.33, 4.63). **0.005 mm.** A HAT would bolt straight onto
+those two holes with nothing in between.
 
-Per the design brief, **J1 (top, male, `PinHeader_2x20_P2.54mm_Vertical`,
-F.Cu) and J2 (bottom, female, `PinSocket_2x20_P2.54mm_Vertical`, B.Cu) sit at
-the exact same (x, y) anchor and rotation** — concentric, not offset. This was
-verified empirically to be achievable cleanly: KiCad's `PinHeader_2x20` and
-`PinSocket_2x20` footprint families are drawn as mirror images of each other
-specifically so that a header mounted on the front and a socket mounted on
-the back, at the same anchor, land every pin at the identical world (x, y).
-Each of the 40 signals is therefore a **single shared plated through-hole**,
-not two holes joined by copper.
+What stops it is height:
 
-**Real-world build note:** two independent, separately-sourced THT parts
-cannot physically share one 1.0 mm drilled hole (whichever part solders in
-first fills it). The buildable way to populate this design is a single
-assembled **"2×20 GPIO stacking header"** per position — a widely-sold
-Raspberry Pi HAT accessory that is a female socket on one face with long
-pins protruding from the other, through the board, in one part. The BOM/CPL
-still list two separate reference designators (J1 for the header/male role,
-J2 for the socket/female role) because that is how the schematic/footprint
-model the two mating faces; in practice one stacking-header part per
-position satisfies both.
-
-### Why no routed traces for most nets
-
-Because J1 and J2 are coincident per pin, 36 of the 40 signals need no
-copper at all — the coincident, same-net pads *are* the connection. Two
-nets have more than one pin per connector and do need real copper:
-- **+3V3** (pins 1 & 17): routed as a 3-segment dogleg that steps 3 mm off
-  the pin row and back, because a naive straight pin-1-to-pin-17 trace would
-  run directly across pins 3/5/7/9/11/13/15 sitting on that same line.
-- **+5V** (pins 2 & 4): adjacent on the row, routed as one straight segment.
-
-**GND** (8 pins per connector) is tied by a copper pour on both F.Cu and
-B.Cu, per the design brief, rather than discrete traces.
-
-### A KiCad quirk on pins 39/40, and how it's handled
-
-Pins 39 and 40 of `Connector_Generic:Conn_02x20_Odd_Even` — confirmed via an
-isolated minimal reproduction (a bare instance of the same library symbol
-with nothing else in the sheet) — resolve, for **connectivity purposes
-only**, to a y-coordinate mirrored across the pin row (anchor + 25.4 mm)
-instead of the library's own documented anchor − 25.4 mm, while the pin
-graphic still *draws* at the documented, correct position. Wiring pins
-39/40 exactly like every other pin (which is what this schematic does, for
-visual consistency with the other 38) therefore produces 6 ERC
-false-positives ("Pin not connected" ×4, "Label not connected to anything"
-×2) that do not reflect any real wiring defect — moving the wire/label to
-match KiCad's buggy internal coordinate does clear the false-positive, but
-only by drawing something that visually floats away from the real pin, which
-would be more misleading than the false-positive it fixes. These 6 findings
-are marked **Excluded** in the project (`kicad-cli sch erc` equivalent: `ERC
-→ right-click → Exclude this violation`), persisted in
-`t_eth_elite_hat_adapter.kicad_pro`, with this explanation on record.
-
-Similarly, placing J1 and J2 concentrically means every pin position is a
-"drilled holes co-located" condition — KiCad has a dedicated, warning-severity
-rule for exactly this pattern (not an error), and it fires 40 times (one per
-pin). This is the intended, deliberate design, not a defect.
-
-## Deliverables in this folder
-
-| File | What it is |
+| part on the Elite | top, above the Elite PCB |
 |---|---|
-| `t_eth_elite_hat_adapter.kicad_pro/.kicad_sch/.kicad_pcb` | The KiCad 7 project |
-| `gerbers/t_eth_elite_hat_adapter_gerbers.zip` | Fab-ready Gerbers (F.Cu, B.Cu, F/B.SilkS, F/B.Mask, Edge.Cuts) + Excellon drill + drill map + job file |
-| `bom.csv` | 2 line items: the header (J1) and the socket (J2) |
-| `cpl.csv` | Placement/position file (Designator, Mid X, Mid Y, Layer, Rotation) |
-| `fp-lib-table` | Project-local footprint library table (MountingHole, Connector_PinHeader_2.54mm, Connector_PinSocket_2.54mm) so the project resolves its footprints standalone |
+| **RJ45 with magnetics** | **15.97 mm** |
+| 40-pin header pins | 10.10 mm |
 
-**Board spec:** 2-layer, 1.6 mm, 1 oz copper. Default net class: 0.3 mm
-track, 0.2 mm clearance, 0.6 mm/0.3 mm via — comfortably inside JLCPCB's
-"standard" 2-layer capability (this design never approaches fine-pitch
-limits; the only routing is the two short +3V3/+5V segments described
-above).
+**The RJ45 stands 5.87 mm proud of the tallest pin.** A HAT pushed onto that
+header bottoms out on the RJ45 long before its socket is seated, and it spans
+the left half of the board, so it fouls it. LilyGo hit the same wall on their
+own LoRa/LTE/Gateway shields and solved it the same way: cut a notch, and lift
+the stack on a tall stacking header. This board is that fix, with the Pi's far
+hole pair added so a full-size HAT is supported at all four corners.
 
-### ERC / DRC status
+## Stack-up
 
-Tool note: the installed `kicad-cli` (7.0.11+dfsg-1build4, from this
-machine's Ubuntu package) does not include the `sch erc` / `pcb drc`
-subcommands (`kicad-cli sch erc` / `kicad-cli pcb drc` both return "Maximum
-number of positional arguments exceeded" — the subcommand isn't registered
-in this build, verified against `kicad-cli --help` at every level). Real ERC
-was run through the actual KiCad 7.0.11 Eeschema GUI (Xvfb-hosted,
-scripted); real DRC was cross-checked two ways: through the actual KiCad
-7.0.11 Pcbnew GUI, and independently via `pcbnew.WriteDRCReport()` (the same
-DRC engine, called directly through KiCad's own Python bindings) — both
-agree.
+```
+   TSN Lab 10BASE-T1S HAT (LAN8651)
+        ↑ plugs onto the pins protruding above this board
+   ── this adapter ──                    ≈13 mm above the Elite PCB
+        ↑ stacking-header socket swallows the Elite's 9.30 mm pins
+        ↑ RJ45 (15.97) passes up through the notch
+   LilyGO T-ETH-Elite (ESP32-S3)
+```
 
-- **ERC: 0 errors, 0 warnings, 6 exclusions** (the pins-39/40 false-positives
-  above, individually excluded with reasons on record in the project file).
-- **DRC: 0 errors, 40 warnings** (the "drilled holes co-located" findings
-  above — all expected, all the same deliberate concentric-stacking pattern,
-  none are courtyard, clearance, hole-clearance, or unconnected-item
-  problems; those all read zero). Note: this KiCad build's "Ignore
-  all"/"Exclude" actions for *DRC* (as opposed to *ERC*) did not persist to
-  the project file in this environment (verified: a fresh reload shows the
-  same 40 warnings again) — so unlike the ERC exclusions, don't expect the
-  GUI to show these as already-excluded on first open; they are still
-  correctly zero *errors*.
+## The board
 
-## Assembly
+- **Outline** 66.22 × 57.20 mm, 3 mm rounded corners, 2-layer, 1.6 mm.
+  Same width as the Elite, extended 8.0 mm in +y so it can carry the HAT's far
+  mounting holes, which land past the Elite's own edge.
+- **RJ45 notch** x 0…17.40, y 10.00…29.40 — a rectangular bite out of the left
+  edge, deliberately ~0.5 mm looser all round than the RJ45's measured
+  envelope. That region is empty board here, so the clearance is free.
+- **Six Ø2.75 non-plated holes** (M2.5 free fit):
 
-1. **4× M2.5 standoffs**, length TBD by the user — long enough to clear
-   whatever sits on top of the T-ETH-Elite's own PCB underneath this
-   adapter (not measured here, see caveats below) — through the 4 mounting
-   holes.
-2. **T-ETH-Elite**: friction-fit into the bottom (B.Cu) socket from below.
-   There is no screw mounting to the T-ETH-Elite itself (see caveats) — it
-   is held the same way any Arduino/Pi shield is normally held, by the
-   header/socket pins alone.
-3. **TSN Lab HAT**: sits on top, secured by its own screws down into this
-   board's 4 holes (through its own oversized body — see caveats about the
-   overhang).
+  | ref | position | serves |
+  |---|---|---|
+  | H1 | (3.33, 4.63) | Elite bottom-left **and** HAT near-left |
+  | H2 | (61.33, 4.63) | Elite bottom-right **and** HAT near-right |
+  | H3 | (2.98, 46.23) | Elite top-left |
+  | H4 | (63.23, 46.20) | Elite top-right |
+  | H5 | (3.33, 53.63) | HAT far-left |
+  | H6 | (61.33, 53.63) | HAT far-right |
+
+  **H1/H2 are shared between the Elite and the HAT on purpose** — see the
+  0.005 mm above. One pair of holes is drilled, not two. Silkscreen marks
+  which is which: `BOTH` / `ELITE` / `HAT`.
+
+  The Elite's four holes are **not a rectangle**: 58.00 mm apart at the bottom,
+  60.25 mm at the top. That asymmetry is real LilyGo design (three independent
+  files agree to <0.1 mm) and it is useful — the pattern is self-keying, so
+  this board physically cannot be bolted on rotated 180°.
+
+- **Two Ø4.0 non-plated tool holes** at (43.73, 47.60) `BOOT` and
+  (54.35, 47.60) `RST`, over the Elite's two ST-1133 tactile switches
+  (SW4 = BOOT, SW5 = EN/RESET), which this board would otherwise bury. Centres
+  are the midpoints of the switch bodies in LilyGo's CAD. Ø4.0 is a
+  tweezer/pen tip, not a finger.
+
+- **One 2×20 THT connector**, pins on x = 8.196 + 2.54·k (k = 0…19),
+  y = 3.360 and 5.900. Plated through-holes, Ø1.0 drill / Ø1.7 pad, annular
+  rings both sides — the solder joint is what mechanically anchors the stack.
+  Stock `Connector_PinHeader_2.54mm:PinHeader_2x20_P2.54mm_Vertical` pad
+  geometry, rotated 90° and translated so its pads land on that grid (the
+  generator measures the resulting pad vectors rather than trusting the
+  footprint's anchor convention).
+
+  **One part, not two.** Earlier versions of this board modelled the joint as a
+  male header on top plus a female socket on the bottom sharing holes, with 40
+  pass-through traces. That is not how it is built. The real part — the one
+  LilyGo fit to their own shields — is a single **stacking header**: socket
+  barrel below the PCB, pins through and above it. One footprint, one set of 40
+  holes, and **no copper between them at all**. The signal path is the header's
+  own pin; pin-to-pin identity is a property of the part, not of the board.
+  Every pad is an isolated net by design, not by oversight.
+
+- **Silkscreen** carries the whole Raspberry Pi 40-pin function map, because
+  the Elite's own header is unlabelled: a per-pin vertical label above each
+  column for pins 11–40, a full 40-entry table for all of them, the pin-1 end
+  marked, `RJ45 side` by the notch, hole roles, and `T-ETH-Elite -> RPi HAT
+  adapter` across the top. The back reads `T-ETH-Elite SIDE`.
+
+  Pins 1–10 get table entries but no per-pin label: their columns sit inside
+  the notch's x span, and between the connector body (which covers the board up
+  to y = 8.40) and the notch (which starts at y = 10.00) there is no room for a
+  legible string. Everything else is labelled at the pin.
+
+### Which pin is pin 1 — derived, not measured
+
+`GEOMETRY.md` fixes the pin *grid* but not the *numbering*, and LilyGo do not
+silkscreen it on the Elite (that is part of why this board is worth having).
+The labels here assume **pin 1 at the low-x end, on the y = 3.360 row** (odd
+pins on the row nearer the board's y = 0 edge, even pins on y = 5.900), on two
+grounds:
+
+1. Standard Raspberry Pi: odd pins are the outer row, nearest the board edge.
+2. On the Elite, header pins 35 and 37 carry `USB_DN`/`USB_DP` (LilyGo
+   schematic sheet 2, J1). Those route to the USB-C receptacle, which is at the
+   Elite's **right-hand** edge — so the pin-40 end is at high x, and pin 1 is at
+   low x, next to the RJ45. The PoE/5 V input being on the same left side as
+   pins 2/4 agrees.
+
+This is an inference, not a measurement. It affects only the silkscreen: the
+connection itself is the stacking header's own pin and is correct either way.
+If you have a board in hand, check it against the table before trusting a
+label.
+
+## Files
+
+| File | What |
+|---|---|
+| `GEOMETRY.md` | **The source of truth.** Provenance for every number. |
+| `make_board.py` | Generator. Emits the `.kicad_pcb` via KiCad 7 `pcbnew` bindings, reads it back and asserts every coordinate, runs DRC, then does all the `kicad-cli` exports. Re-runnable and diffable. |
+| `t_eth_elite_hat_adapter.kicad_pcb` / `.kicad_pro` | KiCad 7 board + project |
+| `gerbers/t_eth_elite_hat_adapter_gerbers.zip` | Fab-ready: 7 gerber layers, separate PTH/NPTH Excellon drill, drill maps, job file |
+| `cpl.csv` | Position file (one line) |
+| `bom.csv` | BOM (one line) |
+| `preview.svg` / `preview.png` | Front view, so the shape can be seen without opening KiCad |
+| `drc.rpt` | DRC report as produced, nothing excluded |
+
+Regenerate everything with `python3 make_board.py`. Geometry is reproducible
+to the last internal unit, but the output is not byte-reproducible: KiCad
+stamps fresh UUIDs into the `.kicad_pcb` and timestamps into the gerbers on
+every run, so a re-run always shows as a diff. Compare the printed coordinate
+table, not the files.
+
+Drill files and `cpl.csv` are plotted against the drill/place origin, which the
+generator puts on `GEOMETRY.md`'s own origin — so e.g. `NPTH.drl` literally
+reads `X3.33Y4.63` and `cpl.csv` reads `8.196, 3.360`. They can be diffed
+against `GEOMETRY.md` by eye.
+
+### BOM — one line
+
+A **2×20, 2.54 mm stacking header**: female socket barrel ≈13 mm below the
+PCB, pins ≈9 mm above it, one part through one set of 40 holes. The same class
+of part LilyGo fit to their own T-ETH-Elite shields. LCSC left blank — the
+exact barrel/pin lengths decide the standoff heights, so pick the part first.
+
+### Standoffs
+
+Pick the header first, then the standoffs to match it, not the other way round:
+
+- **Elite → adapter**: set by the chosen header's barrel, ≈13 mm. Must be
+  ≥ 15.97 + a little if you want the RJ45 to clear without the notch doing the
+  work; with the notch, the barrel height is what it is and the standoffs just
+  have to match it. M2.5, four off (H1–H4).
+- **Adapter → HAT**: set by that header's above-board pin length. M2.5, four
+  off (H1, H2, H5, H6).
+
+## Verification
+
+Every hole centre and all 40 pad centres were read back out of the written
+`.kicad_pcb` and compared against `GEOMETRY.md`: **worst error 0.00000 mm**
+(tolerance 0.01 mm), 48 of 48 features. `make_board.py` prints the full table
+and exits non-zero if any row fails.
+
+### DRC — as reported, nothing excluded
+
+This machine's `kicad-cli` has no `pcb drc` subcommand, so DRC is run through
+`pcbnew.WriteDRCReport()` — the same engine — from the generator:
+
+```
+** Found 8 DRC violations **
+** Found 0 unconnected pads **
+** Found 0 Footprint errors **
+```
+
+All 8 are the same `lib_footprint_issues` warning, one per hole: *"the current
+configuration does not include the library 't_eth_elite_hat_adapter'."* The six
+Ø2.75 and two Ø4.0 NPTH holes are generated inline by the script and belong to
+no footprint library, so the library-consistency test has nothing to compare
+them to. No clearance, courtyard, hole-clearance, silk, edge or connectivity
+finding. Nothing is suppressed or excluded; running it yourself reproduces
+exactly this.
+
+Two findings were fixed in the generator rather than waved away:
+
+- a real `silk_edge_clearance` hit — pin 9's label crossed the notch edge.
+  Per-pin labels now stop where the notch starts.
+- J1 had no library link, so the same test could not check it either. It now
+  carries its true `Connector_PinHeader_2.54mm:` FPID, and the generator points
+  KiCad at its installed library so the test actually runs against the stock
+  footprint. It passes.
+
+### No schematic, deliberately
+
+There is no `.kicad_sch`. A board with one connector and no nets has no
+meaningful schematic, and inventing one purely to be able to report "ERC clean"
+would be worse than having none. The previous version of this board did have
+one; it existed only to hold 40 net labels for traces that should never have
+been there.
 
 ## What is NOT verified — read this before ordering
 
-- **The T-ETH-Elite's own board outline and mounting holes are not known
-  precisely.** Its schematic (sheet 2) shows unpositioned mounting-hole
-  reference designators (H2–H5) with no dimensioned drawing found. A public
-  estimate puts the board around 50 × 67 mm, unverified. This adapter does
-  **not** attempt to screw-mount the T-ETH-Elite — it relies purely on the
-  friction fit of the 40-pin header/socket pair, the same way ordinary
-  shields are normally held.
-- **The TSN Lab HAT is itself an oversized, non-standard HAT**: its listed
-  size is 57 × 75 × 23 mm versus the official 65 × 56.5 mm HAT envelope —
-  about 19 mm longer. Only the 2 mounting holes nearest its 40-pin connector
-  can be assumed to land on this adapter's standard hole positions; the far
-  end of that HAT will overhang unsupported past this adapter board and may
-  need the user's own added support/standoff underneath. This is not a
-  verified mechanical fit for the whole HAT, just for the connector end.
-- **Nothing here has been bench-tested.** No board, no HAT, and no
-  T-ETH-Elite were in hand for this design — it is a design, not a
-  verified-working assembly.
-- **No order was placed.** There is no browser/checkout access, no payment
-  method, no account available in this environment. The deliverable is
-  fab-ready files for the user to upload themselves at jlcpcb.com — nothing
-  here implies an order was placed.
+- **Nothing has been bench-tested.** No adapter, no HAT and no T-ETH-Elite were
+  in hand. This is a design, not a working assembly.
+- **The HAT's hole pattern is photo-derived.** Measured off the product photo
+  scaled by the known 48.26 mm pin-row span, it comes out as a rectangle with
+  ratio 0.852 against the Pi spec's 49/58 = 0.845 — consistent with a standard
+  Pi pattern, which is why H5/H6 are placed at the Pi's +49.0 mm offset. That
+  is the one decision resting on a photo. The listing's "57×75×23 mm" does not
+  match the photo and is assumed to be packaging.
+- **Pin 1's end is inferred**, not measured — see above.
+- **The stacking header is specified by class, not by part number.** Barrel and
+  pin lengths vary between vendors and they set both standoff heights.
+- **No order was placed.** There is no browser/checkout access here. The
+  deliverable is fab-ready files to upload yourself.
+
+Everything the board's *geometry* depends on is measured, not estimated — see
+[`GEOMETRY.md`](GEOMETRY.md) for the provenance of each number, including which
+of the three LilyGo source files each came from and which set was physically
+validated against a real board on a laser-cut plate.
+
+## History
+
+This replaces a board built on KiCad's stock `RaspberryPi-HAT` template: a
+65 × 56.5 mm outline with four holes on a 58 × 49 mm **rectangle**, no RJ45
+notch, and two coincident footprints joined by 40 pass-through traces. Three
+independent things were wrong with it — the Elite's holes are not a rectangle,
+an un-notched board fouls the RJ45, and the connection is one stacking header
+rather than a header plus a socket plus copper. It was rebuilt from
+`GEOMETRY.md` rather than patched.

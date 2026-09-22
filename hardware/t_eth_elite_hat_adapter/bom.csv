@@ -1,3 +1,2 @@
-Comment,Designator,Footprint,LCSC
-GPIO_HAT_HEADER,J1,Connector_PinHeader_2.54mm:PinHeader_2x20_P2.54mm_Vertical,
-T_ETH_ELITE_SOCKET,J2,Connector_PinSocket_2.54mm:PinSocket_2x20_P2.54mm_Vertical,
+Comment,Designator,Footprint,Quantity,Description,LCSC
+2x20 2.54mm stacking header,J1,Connector_PinHeader_2.54mm:PinHeader_2x20_P2.54mm_Vertical,1,"40-way (2x20) 2.54 mm stacking header: female socket barrel ~13 mm below the PCB, pins ~9 mm above it, one part through one set of 40 holes. Same class of part LilyGO fit to their own T-ETH-Elite shields.",

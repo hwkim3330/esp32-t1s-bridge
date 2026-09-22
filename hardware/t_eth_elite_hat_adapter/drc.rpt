@@ -1,0 +1,34 @@
+** Drc report for /home/kim/esp32-t1s-bridge/hardware/t_eth_elite_hat_adapter/t_eth_elite_hat_adapter.kicad_pcb **
+** Created on 2026-09-22 14:58:24 **
+
+** Found 8 DRC violations **
+[lib_footprint_issues]: The current configuration does not include the library 't_eth_elite_hat_adapter'.
+    Local override; Severity: warning
+    @(102.9800 mm, 53.7700 mm): Footprint H3
+[lib_footprint_issues]: The current configuration does not include the library 't_eth_elite_hat_adapter'.
+    Local override; Severity: warning
+    @(161.3300 mm, 46.3700 mm): Footprint H6
+[lib_footprint_issues]: The current configuration does not include the library 't_eth_elite_hat_adapter'.
+    Local override; Severity: warning
+    @(154.3500 mm, 52.4000 mm): Footprint H8
+[lib_footprint_issues]: The current configuration does not include the library 't_eth_elite_hat_adapter'.
+    Local override; Severity: warning
+    @(103.3300 mm, 95.3700 mm): Footprint H1
+[lib_footprint_issues]: The current configuration does not include the library 't_eth_elite_hat_adapter'.
+    Local override; Severity: warning
+    @(161.3300 mm, 95.3700 mm): Footprint H2
+[lib_footprint_issues]: The current configuration does not include the library 't_eth_elite_hat_adapter'.
+    Local override; Severity: warning
+    @(163.2300 mm, 53.8000 mm): Footprint H4
+[lib_footprint_issues]: The current configuration does not include the library 't_eth_elite_hat_adapter'.
+    Local override; Severity: warning
+    @(103.3300 mm, 46.3700 mm): Footprint H5
+[lib_footprint_issues]: The current configuration does not include the library 't_eth_elite_hat_adapter'.
+    Local override; Severity: warning
+    @(143.7300 mm, 52.4000 mm): Footprint H7
+
+** Found 0 unconnected pads **
+
+** Found 0 Footprint errors **
+
+** End of Report **

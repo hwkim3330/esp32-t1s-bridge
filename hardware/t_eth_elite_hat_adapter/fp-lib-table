@@ -1,5 +1,0 @@
-(fp_lib_table
-  (lib (name MountingHole)(type KiCad)(uri ${KICAD7_FOOTPRINT_DIR}/MountingHole.pretty)(options "")(descr "Mounting Holes"))
-  (lib (name Connector_PinHeader_2.54mm)(type KiCad)(uri ${KICAD7_FOOTPRINT_DIR}/Connector_PinHeader_2.54mm.pretty)(options "")(descr "Through hole straight pin headers, 2.54mm pitch"))
-  (lib (name Connector_PinSocket_2.54mm)(type KiCad)(uri ${KICAD7_FOOTPRINT_DIR}/Connector_PinSocket_2.54mm.pretty)(options "")(descr "Through hole straight socket strips, 2.54mm pitch"))
-)

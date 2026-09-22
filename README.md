@@ -289,14 +289,21 @@ plainly what it did and didn't show:
 - **Multiplexing**: a second physical path between a node and the D10
   (target: 2), so a path can be cut without losing the session.
 - **10BASE-T1S**: no custom PHY design needed after all — an off-the-shelf
-  TSN Lab LAN8650 Raspberry Pi HAT plus a pass-through adapter (KiCad
-  project, gerbers included, not yet fabricated or bench-tested) gets T1S
-  onto a T-ETH-Elite (ESP32-S3) node, since the T-ETH-Elite's own 40-pin
-  header already matches the Pi GPIO header pin-for-pin. See
-  `hardware/t_eth_elite_hat_adapter/README.md` for the design, the two
-  things still unverified (T-ETH-Elite's own mounting holes; the HAT's
-  19 mm overhang past the standard HAT envelope), and why no order has been
-  placed yet. Scaling to 4 and 8 ESP32 nodes on the bus is still open.
+  TSN Lab **LAN8651** Raspberry Pi HAT (the product photo's silkscreen reads
+  LAN8651, not the LAN8650 the devicemart listing states) plus a small
+  adapter board gets T1S onto a T-ETH-Elite (ESP32-S3) node. The T-ETH-Elite's
+  own 40-pin header already matches the Pi GPIO header pin-for-pin, *and* its
+  bottom mounting-hole pair matches the Pi's to 0.005 mm — so the adapter is
+  not there for pin mapping at all. It exists because the Elite's RJ45 stands
+  15.97 mm above its PCB while the header pins stop at 10.10 mm: any board
+  plugged straight onto that header fouls the jack. The adapter notches
+  around the RJ45, lifts the stack on one 2×20 stacking header (no traces, no
+  nets — the signal path is the header's own pin), carries the Pi's far hole
+  pair, and leaves Ø4 tool holes over the Elite's BOOT/RESET buttons. KiCad
+  project, generator script and gerbers in
+  `hardware/t_eth_elite_hat_adapter/`; geometry provenance in that folder's
+  `GEOMETRY.md`. Not fabricated, not bench-tested, no order placed. Scaling
+  to 4 and 8 ESP32 nodes on the bus is still open.
 - **Sensors**: not yet specified.
 - **CAN**: explicitly not a required metric in the current task document
   — skipped for now.
