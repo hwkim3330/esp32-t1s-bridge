@@ -20,7 +20,7 @@ Task alignment, roughly:
 | Edge→HPC delay/jitter test | `pc/zenoh_peer.py` RTT echo + firmware ping/pong — see below |
 | Virtual domains (target 8) | 5 done (chassis/body/cabin/diag×2), 3 more to go |
 | QoS/TSN before/after on D10 | control channel works, no clean delta yet — see below |
-| Multiplexing (target 2) | done, STP-level: 2 D10s dual-linked, automatic failover verified — see below |
+| Multiplexing (target 2) | STP failover done+verified (0.51s); FRER (zero-loss) config now correct on both switches, E2E blocked on an ESP32-1 hardware issue — see below |
 
 ## What works now
 
@@ -131,17 +131,58 @@ our ~1s telemetry cadence, that reads as "no observable interruption."
 CSI frame counters, RTT stats, all 5 domains kept incrementing straight
 through the cutover and the restore.
 
-FRER (true zero-loss, no STP reconvergence wait at all) is the fancier
-version of this and is a known, do-able next step —
-`keti-reconfig/docs/D10_SWITCH_REFERENCE.md` and `d10-tsn-manager`'s
-`96ee0ae` commit have the working recipe (`vcl.config.stream.add` with
-`protocol:"ANY"` uppercase, `vcl.config.interface.stream.add` to attach
-the ingress classifier, `frer.config.add` with unused `StreamId0..7` set
-to `0` not `-1`). Not done here yet because it needs disabling STP on
-these same two ports, and with only two switches and two direct links
-between them, that's a genuine 2-node loop — worth doing carefully
-(storm-control safety net first, console open) rather than blind, per
-that doc's own warning from an earlier ring topology.
+**FRER (802.1CB), real config now in place** — `pc/frer_setup.py`
+configures true dual-path replication for the ESP32-1→PC stream (switch2
+Generation, switch1 Recovery) instead of STP's single-active-path
+failover above. Getting from "config that looks right" to "config that's
+actually right" took three real, confirmed bugs, each found by reading
+the switch's own `/json_spec` rather than guessing from field names or
+trusting `keti-reconfig`'s older docs:
+
+1. **Per-port VCL "Matching" mode** (`vcl.config.interface.vcl_cfg.get/set`,
+   not exposed in the web UI keti-reconfig's docs checked): Gi1/2 came up
+   as `smac_sip` while Gi1/1 was `dmac_dip` on both switches — our stream
+   classifies on destination MAC, so a `smac_sip` port silently never
+   matches it at the hardware TCAM level even with the classifier
+   correctly attached.
+2. **STP unconditionally blocking a redundant link's second path is a
+   real hardware constraint, not just an STP nuisance**: with Gi1/2
+   sitting `AlternatePort`/`discarding`, FRER's second egress copy was
+   being dropped downstream of replication regardless of FRER's own
+   config (`frer.status.get`'s `WarningStpBlocked`/`WarningMstpBlocked`
+   flags stayed false throughout, so don't trust them as the signal).
+   Fix: `mstp.config.cist.interface.set(Enable=false)` is a *whole-port*
+   switch, not per-VLAN, so making Gi1/2 always-forward for FRER's VLAN
+   safely requires first narrowing Gi1/2 to being a member of *only* that
+   VLAN (`vlan.config.interface.set`, `HybridVlans=[200]`) — otherwise
+   disabling STP there reopens a real two-switch bridging loop for VLAN 1.
+   Gi1/1 stays untouched (STP-protected, all-VLANs), so general traffic
+   keeps exactly the redundancy it already had.
+3. **The actual root cause of "Passed stays 0 no matter what"**: the
+   ESP32-1 ingress port on switch2 was simply wrong. It was guessed as
+   `Gi 1/6` early on (from RX counter deltas, never actually verified)
+   and that guess stuck through the first two fixes above — `mac.status.fdb.full.get`
+   finally settled it directly: ESP32-1's MAC is on `Gi 1/5`; `Gi 1/6` is
+   ESP32-2's port. The classifier was faithfully attached to a port
+   ESP32-1's frames never arrive on, so it never fired, and what looked
+   like "Generation not replicating" the whole time was just the
+   unclassified original frame being switched normally out Gi1/1.
+
+With the ingress port corrected, `vcl.status.stream.get` confirms
+`frerClientAttached: true` on both switches and `frer.status.get` reports
+zero warnings on both — the config is verified correct by the switch's
+own introspection. **End-to-end verification (`frer.statistics.get`
+showing non-zero `Passed`) is currently blocked by something unrelated**:
+ESP32-1 itself cannot complete `z_open()` to the PC's zenohd right now.
+Ruled out as the cause: the switch config (failure persists with the VCL
+classifier fully detached from Gi1/5), stale runtime state (failure
+persists after a from-scratch reflash of known-good firmware), and the
+CSI/WiFi AP (failure persists with `csiLinkSetup()` compiled out
+entirely). ESP32-2 on the same switch, same router, same subnet works
+normally throughout. That narrows it to ESP32-1's physical Gi1/5 link or
+the board's own W5500 — needs hands-on checking (cable/port swap, power)
+rather than more switch-side config, which is the honest state to leave
+this in.
 
 ## D10 QoS/TSN — control channel works, before/after doesn't show a delta yet
 
@@ -183,10 +224,15 @@ plainly what it did and didn't show:
   bare Python flood and the RTT probe alone.
 - **Multiplexing**: a second physical path between a node and the D10
   (target: 2), so a path can be cut without losing the session.
-- **10BASE-T1S**: swap or add to the W5500 for a single-pair automotive/
-  industrial Ethernet link, then scale to 4 and 8 ESP32 nodes on the bus.
-  No transceiver hardware confirmed on hand yet — chip choice
-  (e.g. LAN8651) and pin mapping TBD once the part is picked.
+- **10BASE-T1S**: no custom PHY design needed after all — an off-the-shelf
+  TSN Lab LAN8650 Raspberry Pi HAT plus a pass-through adapter (KiCad
+  project, gerbers included, not yet fabricated or bench-tested) gets T1S
+  onto a T-ETH-Elite (ESP32-S3) node, since the T-ETH-Elite's own 40-pin
+  header already matches the Pi GPIO header pin-for-pin. See
+  `hardware/t_eth_elite_hat_adapter/README.md` for the design, the two
+  things still unverified (T-ETH-Elite's own mounting holes; the HAT's
+  19 mm overhang past the standard HAT envelope), and why no order has been
+  placed yet. Scaling to 4 and 8 ESP32 nodes on the bus is still open.
 - **Sensors**: not yet specified.
 - **CAN**: explicitly not a required metric in the current task document
   — skipped for now.
