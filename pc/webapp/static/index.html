@@ -328,16 +328,23 @@
       <p class="lede">the three boards' radio paths, used as a direction-of-motion sensor</p>
 
       <div class="card">
-        <h2>Paths <span class="hint">thicker = more channel disturbance right now</span></h2>
-        <div id="csiRadar" style="display:flex;justify-content:center;"></div>
-        <p class="hint" style="margin:14px 0 0;">Each edge is a real radio path between two boards, and its thickness is that path's CSI amplitude variance &mdash; how much the channel is wobbling. A body in a path's Fresnel zone changes the multipath and the edge thickens.</p>
+        <h2>Sensing volume <span class="hint">1&nbsp;m floor grid &middot; cyan = quiet, amber = disturbed</span></h2>
+        <div id="csi3d" style="position:relative;"></div>
+        <div id="csiDetect" style="margin-top:14px;"></div>
+        <p class="hint" style="margin:14px 0 0;">The floor grid and the board positions are the <strong>physical layout on the bench</strong> &mdash; known, not measured. The only measured quantity is each beam's colour and thickness: how far that path's CSI amplitude variance has moved from <strong>its own quiet baseline</strong>. Absolute variance is a property of the room's clutter &mdash; all three paths sit near 530 here and stay there &mdash; so an absolute scale pins at maximum and shows nothing; a path leaving its own baseline is the thing that means something moved. The translucent envelope around each beam is the link's <strong>first Fresnel zone</strong> (r&nbsp;=&nbsp;&radic;(&lambda;d&#8321;d&#8322;/(d&#8321;+d&#8322;)), &lambda;&nbsp;=&nbsp;12.5&nbsp;cm), drawn to scale &mdash; a body has to be inside one of those volumes to move that path's number, so three overlapping envelopes are as much "where" as three links can give.</p>
+        <p class="hint" style="margin:8px 0 0;">The glow on the floor is <strong>where a body would have to be standing</strong> to produce the pattern currently being measured &mdash; cells are scored for sitting inside a disturbed path's zone and scored <em>down</em> for sitting inside a quiet one, which is what makes the middle of the triangle distinguishable from a single edge. It is an intersection of sensing volumes, not a ranging return: there are no range rings here because range resolution is <code>c/2B</code> with B one 20&nbsp;MHz channel &mdash; 7.5&nbsp;m, one bin for the whole room.</p>
       </div>
 
       <div class="card">
-        <h2>Directional readings <span class="hint">both ends measure each path independently</span></h2>
+        <h2>Paths, flat <span class="hint">thicker = more channel disturbance right now</span></h2>
+        <div id="csiRadar" style="display:flex;justify-content:center;"></div>
+      </div>
+
+      <div class="card">
+        <h2>Directional readings <span class="hint">disturbance is measured against each direction&rsquo;s own baseline</span></h2>
         <div style="overflow-x:auto;">
           <table class="reqs">
-            <thead><tr><th>Path</th><th>RSSI</th><th>Amplitude variance</th><th>Frames</th></tr></thead>
+            <thead><tr><th>Path</th><th>RSSI</th><th>Variance now</th><th>Baseline (median)</th><th>Off baseline</th><th></th></tr></thead>
             <tbody id="csiRows"></tbody>
           </table>
         </div>
@@ -361,6 +368,8 @@
 <!-- vendored locally: the testbed PC is often off the internet -->
 <script src="/static/vendor/cytoscape.min.js"></script>
 <script src="/static/vendor/chart.umd.min.js"></script>
+<script src="/static/vendor/three.min.js"></script>
+<script src="/static/csi3d.js"></script>
 <script>
 const NODE_ORDER = ["esp32-1", "esp32-2", "esp32-3", "pc"];
 const NODE_LABEL = { "esp32-1": "ESP32-1 (Gi1/3)", "esp32-2": "ESP32-2 (Gi1/6)", "esp32-3": "ESP32-3 (Gi1/5, FRER)", "pc": "PC" };
@@ -725,27 +734,91 @@ const CSI_POS = {  // three boards, three bearings, 120 degrees apart
   "esp32-3": { x: 296, y: 262, label: "ESP32-3" },
 };
 
+let csi3dReady = false;
+
+// Per-path history of amplitude variance, so disturbance can be read against
+// each path's OWN quiet level. Absolute variance is a property of the room's
+// clutter, not of anything moving in it: on this bench all three paths sit
+// near 530 and never move off it, which pins any absolute scale at maximum
+// and tells you nothing. A path departing from its own baseline is the signal.
+const CSI_HIST = {};
+const CSI_HIST_LEN = 90;      // ~90 s at the 1 Hz poll
+const CSI_FULL_SCALE = 0.35;  // 35% off baseline reads as fully disturbed
+
+// Keyed per DIRECTION, not per path. The two ends of one path are separate
+// receivers with their own RF chain and gain, and they genuinely disagree:
+// esp32-1 reads ~555 on its link to esp32-2 while esp32-2 reads ~24 on the
+// same air. Sharing one baseline between them made every row report the same
+// meaningless number.
+function csiDisturbance(key, v) {
+  const h = CSI_HIST[key] || (CSI_HIST[key] = []);
+  h.push(v);
+  if (h.length > CSI_HIST_LEN) h.shift();
+  // Median, not mean: a person walking through should not drag the very
+  // baseline that is supposed to reveal them.
+  const sorted = [...h].sort((a, b) => a - b);
+  const med = sorted[Math.floor(sorted.length / 2)];
+  if (!med || h.length < 8) return { v, f: 0, med, warming: true };
+  const rel = Math.abs(v - med) / med;
+  return { v, f: Math.min(1, rel / CSI_FULL_SCALE), med, rel, warming: false };
+}
+
 function renderCsi(state) {
   const links = state.csi?.links || [];
-  // Each path is measured from both ends; show the livelier of the two, since
-  // a path is disturbed whether or not both ends happen to notice equally.
+  if (!csi3dReady && window.CSI3D && typeof THREE !== "undefined") {
+    CSI3D.init(document.getElementById("csi3d"));
+    csi3dReady = true;
+  }
+
+  // Every direction gets its own baseline; the drawing then takes whichever
+  // end of a path is reacting more, since a path is disturbed whether or not
+  // both ends notice it equally.
+  const perDir = {};
+  for (const l of links) perDir[`${l.tx}>${l.rx}`] = csiDisturbance(`${l.tx}>${l.rx}`, l.var);
+
   const paths = {};
   for (const l of links) {
     const key = [l.tx, l.rx].sort().join("|");
-    if (!paths[key] || l.var > paths[key].var) paths[key] = l;
+    const d = perDir[`${l.tx}>${l.rx}`];
+    if (!paths[key] || d.f > paths[key].f) paths[key] = d;
   }
-  const vals = Object.values(paths).map(p => p.var);
-  const vmax = Math.max(40, ...vals);
+
+  const hit = csi3dReady ? CSI3D.update(paths, state.nodes) : null;
+
+  // Which paths are disturbed is three bits, and the bits localise: the
+  // centre of the triangle sits inside all three Fresnel zones, a point by
+  // one edge inside only that one, a point by a board inside the two that
+  // touch it. Name the region rather than leaving the reader to decode it.
+  const hotKeys = Object.entries(paths).filter(([, p]) => p.f > 0.25).map(([k]) => k);
+  const boardHits = {};
+  for (const k of hotKeys) for (const id of k.split("|")) boardHits[id] = (boardHits[id] || 0) + 1;
+  let where;
+  if (!hotKeys.length) where = null;
+  else if (hotKeys.length === 3) where = "middle of the triangle &mdash; all three paths are crossed";
+  else if (hotKeys.length === 2) {
+    const shared = Object.entries(boardHits).find(([, n]) => n === 2);
+    where = shared ? `near <strong>${shared[0]}</strong> &mdash; both of its paths are crossed`
+                   : "across two paths";
+  } else {
+    where = `on the <strong>${hotKeys[0].split("|").join(" &ndash; ")}</strong> path only`;
+  }
+
+  document.getElementById("csiDetect").innerHTML = where
+    ? `<div class="statusblock warn">disturbance detected</div>
+       <p style="margin:10px 0 0;font-size:0.9rem;">Pattern says: ${where}.
+       ${hit ? `Field peaks at <code>x&nbsp;${hit.x.toFixed(2)}&nbsp;m, z&nbsp;${hit.z.toFixed(2)}&nbsp;m</code> in bench coordinates.` : ""}</p>`
+    : `<div class="statusblock">all paths at baseline</div>
+       <p class="hint" style="margin:10px 0 0;">Nothing is drawn on the floor while every path sits at its own quiet level &mdash; an empty field here means empty, not "sensor off".</p>`;
 
   const edges = Object.entries(paths).map(([key, p]) => {
     const [a, b] = key.split("|");
     const A = CSI_POS[a], B = CSI_POS[b];
     if (!A || !B) return "";
-    const f = Math.min(1, p.var / vmax);
-    const w = 1.5 + f * 9;
-    return `<line x1="${A.x}" y1="${A.y}" x2="${B.x}" y2="${B.y}" stroke="var(--accent)"
-              stroke-opacity="${(0.28 + f * 0.62).toFixed(2)}" stroke-width="${w.toFixed(1)}"
-              stroke-linecap="round"><title>${a} to ${b}: var ${p.var.toFixed(1)}</title></line>`;
+    const w = 1.5 + p.f * 9;
+    const hue = 196 - 174 * p.f;   // cyan when quiet, amber when disturbed
+    return `<line x1="${A.x}" y1="${A.y}" x2="${B.x}" y2="${B.y}"
+              stroke="hsl(${hue} 78% 48%)" stroke-opacity="${(0.34 + p.f * 0.56).toFixed(2)}"
+              stroke-width="${w.toFixed(1)}" stroke-linecap="round"><title>${a} to ${b}: ${(p.f * 100).toFixed(0)}% off baseline</title></line>`;
   }).join("");
 
   const dots = Object.entries(CSI_POS).map(([id, P]) => {
@@ -757,19 +830,29 @@ function renderCsi(state) {
 
   document.getElementById("csiRadar").innerHTML = links.length
     ? `<svg viewBox="0 0 340 300" style="max-width:420px;width:100%;height:auto;color:var(--ink);"
-            role="img" aria-label="Three boards and the radio paths between them, thicker where the channel is more disturbed">
+            role="img" aria-label="Three boards and the radio paths between them, thicker where the path has moved off its own baseline">
          ${edges}${dots}
        </svg>`
     : `<p class="hint" style="padding:30px 0;">no CSI reports yet</p>`;
 
-  const rows = links.sort((a, b) => b.var - a.var).map(l => `<tr>
+  const rows = links.sort((a, b) => b.var - a.var).map(l => {
+    const p = perDir[`${l.tx}>${l.rx}`];
+    const off = p && !p.warming ? `${(p.rel * 100).toFixed(0)}%` : "&mdash;";
+    const badge = !p || p.warming ? `<span class="badge info">learning baseline</span>`
+      : p.f > 0.6 ? `<span class="badge warn">disturbed</span>`
+      : p.f > 0.25 ? `<span class="badge info">some movement</span>`
+      : `<span class="badge good">quiet</span>`;
+    return `<tr>
       <td class="metric">${l.tx} &rarr; ${l.rx}</td>
       <td class="current">${l.rssi} dBm</td>
       <td class="current">${l.var.toFixed(1)}</td>
-      <td class="current">${l.frames.toLocaleString()}</td>
-    </tr>`).join("");
+      <td class="current">${p && p.med ? p.med.toFixed(1) : "&mdash;"}</td>
+      <td class="current">${off}</td>
+      <td>${badge}</td>
+    </tr>`;
+  }).join("");
   document.getElementById("csiRows").innerHTML = rows ||
-    `<tr><td colspan="4" style="color:var(--muted)">no paths resolved &mdash; boards report raw MACs, and none matched a known board</td></tr>`;
+    `<tr><td colspan="6" style="color:var(--muted)">no paths resolved &mdash; boards report raw MACs, and none matched a known board</td></tr>`;
 }
 
 function render(state) {
